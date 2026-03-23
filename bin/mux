@@ -13,7 +13,8 @@ Commands:
   <index>
   tab <name>
   list
-  persist
+  save
+  s
   restore
 EOF
 }
@@ -105,13 +106,13 @@ command_string_for_title() {
   esac
 }
 
-best_effort_persist_on_launch() {
+best_effort_save_on_launch() {
   if ! command -v cmux >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
     return 0
   fi
 
-  if ! cmd_persist >/dev/null; then
-    echo "warning: mux persist failed during launch" >&2
+  if ! cmd_save >/dev/null; then
+    echo "warning: mux save failed during launch" >&2
   fi
 }
 
@@ -120,7 +121,7 @@ open_session() {
   local title="$2"
 
   rename_cmux_tab "$title"
-  best_effort_persist_on_launch
+  best_effort_save_on_launch
   exec tmux new-session -A -s "$name"
 }
 
@@ -190,7 +191,7 @@ live_mux_entries() {
   state_file="$(state_file_path)"
   if [ ! -f "$state_file" ]; then
     echo "missing state file: $state_file" >&2
-    echo "run: mux persist" >&2
+    echo "run: mux save" >&2
     exit 1
   fi
 
@@ -347,7 +348,7 @@ cmd_name() {
   open_session "$name" "mux $name"
 }
 
-cmd_persist() {
+cmd_save() {
   local state_file temp_file
 
   ensure_command cmux
@@ -381,7 +382,7 @@ cmd_persist() {
   ' >"$temp_file"
 
   mv "$temp_file" "$state_file"
-  printf 'persisted %s\n' "$state_file"
+  printf 'saved %s\n' "$state_file"
 }
 
 cmd_restore() {
@@ -394,7 +395,7 @@ cmd_restore() {
   state_file="$(state_file_path)"
   if [ ! -f "$state_file" ]; then
     echo "missing state file: $state_file" >&2
-    echo "run: mux persist" >&2
+    echo "run: mux save" >&2
     exit 1
   fi
 
@@ -467,9 +468,9 @@ main() {
       shift
       cmd_list "$@"
       ;;
-    persist)
+    save|s)
       shift
-      cmd_persist "$@"
+      cmd_save "$@"
       ;;
     restore)
       shift

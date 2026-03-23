@@ -10,7 +10,7 @@ Standalone Bash CLI for restoring tmux-backed terminals inside cmux.
 - `mux list` shows the current mux-backed tabs in a table with numeric and letter selectors.
 - `mux <selector>` such as `mux 1` or `mux a` joins the matching listed mux tab when a selector match exists.
 - `mux -h`, `mux --help`, and `mux help` print usage.
-- `mux persist` rewrites the saved snapshot for all current cmux workspaces.
+- `mux save` and `mux s` rewrite the saved snapshot for all current cmux workspaces.
 - `mux restore` best-effort restores only saved `mux <name>` and `mux tab <name>` terminals in existing cmux workspaces.
 
 ## Selector Rules
@@ -33,7 +33,7 @@ Standalone Bash CLI for restoring tmux-backed terminals inside cmux.
 
 - If `cmux` is available, `mux list` reads the live `cmux tree --all --json` view.
 - If `cmux` is unavailable, `mux list` and selector-based joining fall back to the persisted state file.
-- Launch-time auto-persist is skipped silently when `cmux` or `jq` is unavailable.
+- Launch-time auto-save is skipped silently when `cmux` or `jq` is unavailable.
 
 ## State File
 

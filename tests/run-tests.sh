@@ -809,7 +809,7 @@ EOF
   assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected numeric selection to work from saved state without cmux"
 }
 
-test_persist_rewrites_state_with_only_mux_tabs() {
+test_save_and_s_rewrite_state_with_only_mux_tabs() {
   local temp_dir stub_dir state_file tree_json
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -896,7 +896,22 @@ EOF
 
   PATH="$stub_dir:$PATH" \
   MUX_STATE_FILE="$state_file" \
-  "$ROOT_DIR/bin/mux" persist
+  "$ROOT_DIR/bin/mux" save
+
+  assert_json_filter_equals "$state_file" '.version' "1"
+  assert_json_filter_equals "$state_file" '.workspaces | length' "2"
+  assert_json_filter_equals "$state_file" '.workspaces[0].title' "Alpha"
+  assert_json_filter_equals "$state_file" '.workspaces[0].entries | length' "1"
+  assert_json_filter_equals "$state_file" '.workspaces[0].entries[0].session' "claude-123"
+  assert_json_filter_equals "$state_file" '.workspaces[0].entries[0].pane_index' "0"
+  assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].title' "mux backend"
+  assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].session' "backend"
+
+  printf 'stale-again\n' >"$state_file"
+
+  PATH="$stub_dir:$PATH" \
+  MUX_STATE_FILE="$state_file" \
+  "$ROOT_DIR/bin/mux" s
 
   assert_json_filter_equals "$state_file" '.version' "1"
   assert_json_filter_equals "$state_file" '.workspaces | length' "2"
@@ -1039,7 +1054,8 @@ test_readme_documents_supported_commands() {
   readme="$(cat "$ROOT_DIR/README.md")"
   assert_contains "mux <name>" "$readme" "expected bare alias usage in README"
   assert_contains "mux tab <name>" "$readme" "expected tab usage in README"
-  assert_contains "mux persist" "$readme" "expected persist usage in README"
+  assert_contains "mux save" "$readme" "expected save usage in README"
+  assert_contains "mux s" "$readme" "expected short save usage in README"
   assert_contains "mux restore" "$readme" "expected restore usage in README"
 }
 
@@ -1060,7 +1076,7 @@ main() {
   test_mux_numeric_selection_rejects_unknown_index
   test_mux_unmatched_numeric_and_letter_fall_back_to_session_names
   test_mux_list_and_index_work_without_cmux_using_saved_state
-  test_persist_rewrites_state_with_only_mux_tabs
+  test_save_and_s_rewrite_state_with_only_mux_tabs
   test_restore_respawns_matching_saved_mux_tabs_best_effort
   test_readme_documents_supported_commands
   echo "PASS"

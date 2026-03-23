@@ -1,6 +1,6 @@
 # Mux Backlog
 
-**Current state:** `bin/mux` now auto-persists on mux-managed session entry, `mux list` exposes numeric and letter selectors, bare selectors fall back to literal tmux session names when no listed mux tab matches, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
+**Current state:** `bin/mux` now auto-saves on mux-managed session entry, `mux save` and `mux s` rewrite the snapshot on demand, `mux list` exposes numeric and letter selectors, bare selectors fall back to literal tmux session names when no listed mux tab matches, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
 
 ## Remaining Work
 
@@ -51,24 +51,6 @@
 - Kill every listed unmatched tmux session after confirmation.
 - Abort without changes for any answer other than `yes`.
 - Document the command behavior, confirmation requirement, and examples in `README.md`.
-
-### Task 4: Replace `persist` with `save` and `s`
-
-**Standalone:** yes
-**Depends on:** none
-
-**Files:**
-- Update: `bin/mux`
-- Update: `README.md`
-- Update: `tests/run-tests.sh`
-
-**Goal:** remove `mux persist` and make `mux save` and `mux s` the only save commands.
-
-**Requirements:**
-- Remove `mux persist` from the command dispatcher.
-- Add `mux save` and `mux s` as aliases for the current persistence behavior.
-- Update tests for the new command names.
-- Update `README.md` examples and usage text.
 
 ### Task 5: Make `mux` Show Help and Add Non-Destructive Command Aliases
 
