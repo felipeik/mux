@@ -52,6 +52,137 @@
 - Abort without changes for any answer other than `yes`.
 - Document the command behavior, confirmation requirement, and examples in `README.md`.
 
+### Task 4: Replace `persist` with `save` and `s`
+
+**Standalone:** yes
+**Depends on:** none
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+- Update: `tests/run-tests.sh`
+
+**Goal:** remove `mux persist` and make `mux save` and `mux s` the only save commands.
+
+**Requirements:**
+- Remove `mux persist` from the command dispatcher.
+- Add `mux save` and `mux s` as aliases for the current persistence behavior.
+- Update tests for the new command names.
+- Update `README.md` examples and usage text.
+
+### Task 5: Make `mux` Show Help and Add Non-Destructive Command Aliases
+
+**Standalone:** yes
+**Depends on:** none
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+- Update: `tests/run-tests.sh`
+
+**Goal:** make the CLI fully command-first for help and lookup commands.
+
+**Requirements:**
+- Make `mux`, `mux help`, `mux -h`, and `mux --help` show usage.
+- Add `mux l` as an alias for `mux list`.
+- Add `mux r` as an alias for `mux restore`.
+- Update tests for the new aliases and default help behavior.
+- Update `README.md` examples and usage text.
+
+### Task 6: Remove Bare `mux <name>` and Make `t`/`tab` the Only Session-Launch Commands
+
+**Standalone:** no
+**Depends on:** Task 5
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+- Update: `tests/run-tests.sh`
+
+**Goal:** remove implicit bare-name launching and require an explicit launch command.
+
+**Requirements:**
+- Remove bare `mux <name>` as a supported way to open or create tmux sessions.
+- Support `mux t <name>` and `mux tab <name>` as the only session-launch commands.
+- Make `mux t 1` and `mux t a` treat the argument as a literal tmux session name rather than a list selector.
+- Update tests for the removed bare-name behavior and the new `t` alias.
+- Update `README.md` examples and usage text.
+
+### Task 7: Standardize Session Tab Titles as `mux <name>`
+
+**Standalone:** no
+**Depends on:** Task 6
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+- Update: `tests/run-tests.sh`
+
+**Goal:** make all session-launch commands use the same visible tab title format.
+
+**Requirements:**
+- Make both `mux t <name>` and `mux tab <name>` rename the visible tab to `mux <name>`.
+- Ensure persistence and restore still recognize and handle standardized `mux <name>` titles.
+- Update tests for the standardized title behavior.
+- Update `README.md` examples and restore notes.
+
+### Task 8: Remove the Redundant `Title` Column from `mux list`
+
+**Standalone:** yes
+**Depends on:** none
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+- Update: `tests/run-tests.sh`
+
+**Goal:** simplify `mux list` output by hiding the tab title column.
+
+**Requirements:**
+- Remove the `Title` column from list output.
+- Keep the numeric selector, letter selector, workspace, and session columns.
+- Update list-format tests.
+- Update `README.md` examples if needed.
+
+### Task 9: Add Non-Interactive `mux pick <selector>` and `mux p <selector>`
+
+**Standalone:** yes
+**Depends on:** none
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+- Update: `tests/run-tests.sh`
+
+**Goal:** add a selector-only command that resolves existing mux list entries without creating new sessions.
+
+**Requirements:**
+- Add `mux pick` and `mux p` as selector commands.
+- Support `mux pick 1`, `mux pick a`, and similar direct selectors without prompting.
+- Keep `mux pick` selector-only: it must resolve existing mux list entries and never create a new tmux session as a fallback.
+- Return a clear error when the requested selector does not match a listed mux entry.
+- Update tests for direct selector behavior and no-fallback behavior.
+- Update `README.md` examples and usage text.
+
+### Task 10: Add Interactive `mux pick` with No Selector
+
+**Standalone:** no
+**Depends on:** Task 9
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+- Update: `tests/run-tests.sh`
+
+**Goal:** make `mux pick` interactive when no selector is passed.
+
+**Requirements:**
+- Support `mux pick` and `mux p` with no selector as an interactive picker that shows the list and waits for user input in interactive terminals.
+- Reuse the same selector resolution rules as `mux pick <selector>`.
+- Avoid hanging in non-interactive contexts such as pipes or scripts.
+- Update tests for interactive and non-interactive behavior.
+- Update `README.md` examples and usage text.
+
 ## Research Notes
 
 - tmux documents server, session, and window hooks such as `window-renamed`, plus control-mode notifications including `%window-add`, `%window-close`, and `%window-renamed`: https://man7.org/linux/man-pages/man1/tmux.1.html
