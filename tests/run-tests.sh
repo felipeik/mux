@@ -17,15 +17,32 @@ write_executable() {
 }
 
 test_cli_help_flags_print_usage() {
-  local short_output long_output
+  local short_output long_output alias_output help_output
   short_output="$("$ROOT_DIR/bin/mux" -h 2>&1 || true)"
   long_output="$("$ROOT_DIR/bin/mux" --help 2>&1 || true)"
+  alias_output="$("$ROOT_DIR/bin/mux" h 2>&1 || true)"
+  help_output="$("$ROOT_DIR/bin/mux" help 2>&1 || true)"
   assert_contains "usage" "$short_output" "expected mux -h output"
   assert_contains "usage" "$long_output" "expected mux --help output"
+  assert_contains "usage" "$alias_output" "expected mux h output"
+  assert_contains "usage" "$help_output" "expected mux help output"
 }
 
-test_mux_with_no_args_matches_mux_list() {
-  local temp_dir stub_dir bare_output list_output
+test_mux_with_no_args_prints_usage() {
+  local output
+  output="$("$ROOT_DIR/bin/mux" 2>&1 || true)"
+  assert_contains "usage: mux" "$output" "expected bare mux to print usage"
+  assert_contains "list, l" "$output" "expected grouped list alias in usage"
+  assert_contains "restore, r" "$output" "expected grouped restore alias in usage"
+  case "$output" in
+    *"Workspace  Session"*)
+      fail "expected bare mux to print usage instead of the list table"
+      ;;
+  esac
+}
+
+test_mux_l_alias_matches_mux_list() {
+  local temp_dir stub_dir alias_output list_output
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
   mkdir -p "$stub_dir"
@@ -70,11 +87,39 @@ EOF
 exit 0
 EOF
 
-  bare_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" 2>&1 || true)"
+  alias_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" l 2>&1 || true)"
   list_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
 
-  assert_eq "$list_output" "$bare_output" "expected bare mux to match mux list output"
-  assert_contains "Workspace" "$bare_output" "expected bare mux to show the list table"
+  assert_eq "$list_output" "$alias_output" "expected mux l to match mux list output"
+  assert_contains "Workspace  Session" "$alias_output" "expected mux l to show the list table"
+}
+
+test_mux_r_alias_matches_mux_restore() {
+  local temp_dir stub_dir state_file alias_output restore_output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  state_file="$temp_dir/state.json"
+  mkdir -p "$stub_dir"
+
+  cat >"$state_file" <<'EOF'
+{"version":1,"workspaces":[]}
+EOF
+
+  write_executable "$stub_dir/cmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "tree" ] && [ "$2" = "--all" ] && [ "$3" = "--json" ]; then
+  cat <<'OUT'
+{"windows":[]}
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  alias_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" r 2>&1 || true)"
+  restore_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" restore 2>&1 || true)"
+
+  assert_eq "$restore_output" "$alias_output" "expected mux r to match mux restore output"
 }
 
 test_tab_uses_tmux_new_session_and_renames_cmux_tab() {
@@ -448,8 +493,8 @@ EOF
   esac
 }
 
-test_mux_numeric_selection_attaches_by_list_index() {
-  local temp_dir stub_dir log_file
+test_mux_numeric_selection_is_invalid() {
+  local temp_dir stub_dir log_file output
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
   log_file="$temp_dir/log.txt"
@@ -511,18 +556,24 @@ EOF
 printf 'tmux:%s\n' "\$*" >>"$log_file"
 EOF
 
-  PATH="$stub_dir:$PATH" \
+  output="$(PATH="$stub_dir:$PATH" \
   CMUX_WORKSPACE_ID="workspace:1" \
   CMUX_SURFACE_ID="surface:9" \
   MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" 1 || true
+  "$ROOT_DIR/bin/mux" 1 2>&1 || true)"
 
-  assert_file_exists "$log_file"
-  assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected mux 1 to attach to the first listed session"
+  assert_contains "usage: mux" "$output" "expected mux 1 to print usage"
+  if [ -f "$log_file" ]; then
+    case "$(cat "$log_file")" in
+      *"tmux:new-session -A -s"*)
+        fail "expected mux 1 to avoid tmux launch"
+        ;;
+    esac
+  fi
 }
 
-test_mux_letter_selection_attaches_by_list_key() {
-  local temp_dir stub_dir log_file
+test_mux_letter_selection_is_invalid() {
+  local temp_dir stub_dir log_file output
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
   log_file="$temp_dir/log.txt"
@@ -584,14 +635,20 @@ EOF
 printf 'tmux:%s\n' "\$*" >>"$log_file"
 EOF
 
-  PATH="$stub_dir:$PATH" \
+  output="$(PATH="$stub_dir:$PATH" \
   CMUX_WORKSPACE_ID="workspace:1" \
   CMUX_SURFACE_ID="surface:9" \
   MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" b || true
+  "$ROOT_DIR/bin/mux" b 2>&1 || true)"
 
-  assert_file_exists "$log_file"
-  assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected mux b to attach to the second listed session"
+  assert_contains "usage: mux" "$output" "expected mux b to print usage"
+  if [ -f "$log_file" ]; then
+    case "$(cat "$log_file")" in
+      *"tmux:new-session -A -s"*)
+        fail "expected mux b to avoid tmux launch"
+        ;;
+    esac
+  fi
 }
 
 test_mux_join_numeric_selector_attaches_by_list_index() {
@@ -925,7 +982,7 @@ EOF
   fi
 }
 
-test_mux_numeric_selection_does_not_launch_tmux_from_list_stdin() {
+test_mux_invalid_numeric_selection_does_not_launch_tmux_from_list_stdin() {
   local temp_dir stub_dir log_file
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -995,14 +1052,16 @@ EOF
   CMUX_WORKSPACE_ID="workspace:1" \
   CMUX_SURFACE_ID="surface:9" \
   MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" 1 || true
+  "$ROOT_DIR/bin/mux" 1 >"$temp_dir/output.txt" 2>&1 || true
 
-  assert_file_exists "$log_file"
-  case "$(cat "$log_file")" in
-    *"stdin:"*)
-      fail "expected mux 1 to launch tmux after list iteration, not with list stdin attached"
-      ;;
-  esac
+  if [ -f "$log_file" ]; then
+    case "$(cat "$log_file")" in
+      *"stdin:"*|*"tmux:new-session -A -s"*)
+        fail "expected mux 1 to avoid tmux launch entirely"
+        ;;
+    esac
+  fi
+  assert_contains "usage: mux" "$(cat "$temp_dir/output.txt")" "expected mux 1 to print usage"
 }
 
 test_mux_unknown_selectors_error_without_launching_sessions() {
@@ -1036,7 +1095,7 @@ EOF
   assert_contains "usage: mux" "$output" "expected mux z to print usage when no selector matches"
 }
 
-test_mux_list_and_index_work_without_cmux_using_saved_state() {
+test_mux_list_and_invalid_selector_work_without_cmux_using_saved_state() {
   local temp_dir stub_dir state_file log_file output jq_bin
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -1102,12 +1161,18 @@ EOF
       ;;
   esac
 
-  PATH="$stub_dir:/usr/bin:/bin" \
+  output="$(PATH="$stub_dir:/usr/bin:/bin" \
   MUX_STATE_FILE="$state_file" \
-  "$ROOT_DIR/bin/mux" 1 || true
+  "$ROOT_DIR/bin/mux" 1 2>&1 || true)"
 
-  assert_file_exists "$log_file"
-  assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected numeric selection to work from saved state without cmux"
+  assert_contains "usage: mux" "$output" "expected numeric selection to print usage from saved state without cmux"
+  if [ -f "$log_file" ]; then
+    case "$(cat "$log_file")" in
+      *"tmux:new-session -A -s"*)
+        fail "expected saved-state numeric selection to avoid tmux launch"
+        ;;
+    esac
+  fi
 }
 
 test_save_and_s_rewrite_state_with_only_canonical_mux_tabs() {
@@ -1684,6 +1749,11 @@ EOF
 test_readme_documents_supported_commands() {
   local readme
   readme="$(cat "$ROOT_DIR/README.md")"
+  assert_contains "mux help" "$readme" "expected help-first default in README"
+  assert_contains "mux h" "$readme" "expected short help alias in README"
+  assert_contains "mux --help" "$readme" "expected long help flag in README"
+  assert_contains "mux list" "$readme" "expected list command in README"
+  assert_contains "mux l" "$readme" "expected list alias in README"
   assert_contains "mux t <name>" "$readme" "expected t usage in README"
   assert_contains "mux tab <name>" "$readme" "expected tab usage in README"
   assert_contains "mux join <selector>" "$readme" "expected join usage in README"
@@ -1693,16 +1763,22 @@ test_readme_documents_supported_commands() {
   assert_contains "mux cleanup" "$readme" "expected cleanup usage in README"
   assert_contains "mux cleanup --auto-approve" "$readme" "expected cleanup auto-approve usage in README"
   assert_contains "mux restore" "$readme" "expected restore usage in README"
+  assert_contains "mux r" "$readme" "expected restore alias usage in README"
   case "$readme" in
-    *"mux <name> attaches or creates a tmux session"*)
-      fail "expected README to drop bare mux <name> launch docs"
+    *"is an alias for `mux list`."*)
+      fail "expected README to drop bare mux list alias docs"
+      ;;
+    *"mux <selector>"*|*"joins the matching listed mux tab when a selector match exists"*)
+      fail "expected README to drop bare selector join docs"
       ;;
   esac
 }
 
 main() {
   test_cli_help_flags_print_usage
-  test_mux_with_no_args_matches_mux_list
+  test_mux_with_no_args_prints_usage
+  test_mux_l_alias_matches_mux_list
+  test_mux_r_alias_matches_mux_restore
   test_tab_uses_tmux_new_session_and_renames_cmux_tab
   test_t_uses_tmux_new_session_and_renames_cmux_tab
   test_bare_name_requires_explicit_launch_command
@@ -1711,16 +1787,16 @@ main() {
   test_launch_commands_treat_literal_names_as_session_names
   test_mux_list_prints_numbered_mux_tabs_only
   test_mux_list_hides_conflict_marker_when_no_selector_conflicts_exist
-  test_mux_numeric_selection_attaches_by_list_index
-  test_mux_letter_selection_attaches_by_list_key
+  test_mux_numeric_selection_is_invalid
+  test_mux_letter_selection_is_invalid
   test_mux_join_numeric_selector_attaches_by_list_index
   test_mux_join_alias_letter_selector_attaches_by_list_key
   test_mux_join_unknown_selector_does_not_fall_back_to_literal_session
   test_mux_join_without_selector_reads_prompt_in_interactive_mode
   test_mux_join_without_selector_prints_list_and_errors_in_non_interactive_mode
-  test_mux_numeric_selection_does_not_launch_tmux_from_list_stdin
+  test_mux_invalid_numeric_selection_does_not_launch_tmux_from_list_stdin
   test_mux_unknown_selectors_error_without_launching_sessions
-  test_mux_list_and_index_work_without_cmux_using_saved_state
+  test_mux_list_and_invalid_selector_work_without_cmux_using_saved_state
   test_save_and_s_rewrite_state_with_only_canonical_mux_tabs
   test_restore_respawns_matching_saved_canonical_mux_tabs_best_effort
   test_mux_cleanup_requires_cmux

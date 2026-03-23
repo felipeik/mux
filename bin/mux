@@ -4,22 +4,16 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: mux
-       mux <index>
-       mux <key>
        mux <command>
 
 Commands:
-  <index>
-  join [<selector>]
-  j [<selector>]
-  <key>
-  t <name>
-  tab <name>
-  list
-  save
-  s
+  help, h, -h, --help
+  join, j [<selector>]
+  tab, t <name>
+  list, l
+  save, s
   cleanup [--auto-approve]
-  restore
+  restore, r
 EOF
 }
 
@@ -342,25 +336,6 @@ cmd_launch() {
   open_session "$name" "mux $name"
 }
 
-cmd_selector() {
-  local selector="${1:-}"
-  local entry session title
-
-  if [ -z "$selector" ]; then
-    usage >&2
-    exit 1
-  fi
-
-  if entry="$(find_entry_by_selector "$selector")"; then
-    session="$(printf '%s\n' "$entry" | jq -r '.session')"
-    title="$(printf '%s\n' "$entry" | jq -r '.title')"
-    join_session "$session" "$title"
-  fi
-
-  usage >&2
-  exit 1
-}
-
 is_interactive_terminal() {
   [ -t 0 ] && [ -t 1 ]
 }
@@ -589,8 +564,8 @@ EOF
 
 main() {
   case "${1:-}" in
-    "")
-      cmd_list
+    ""|-h|--help|help|h)
+      usage
       ;;
     tab)
       shift
@@ -604,7 +579,7 @@ main() {
       shift
       cmd_join "$@"
       ;;
-    list)
+    list|l)
       shift
       cmd_list "$@"
       ;;
@@ -616,15 +591,13 @@ main() {
       shift
       cmd_cleanup "$@"
       ;;
-    restore)
+    restore|r)
       shift
       cmd_restore "$@"
       ;;
-    -h|--help|help)
-      usage
-      ;;
     *)
-      cmd_selector "$@"
+      usage >&2
+      exit 1
       ;;
   esac
 }

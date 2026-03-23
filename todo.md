@@ -1,6 +1,6 @@
 # Mux Backlog
 
-**Current state:** `bin/mux` now auto-saves on mux-managed session entry, `mux save` and `mux s` rewrite the snapshot on demand, `mux list` exposes numeric and letter selectors, bare selector matches still join existing mux entries, unmatched bare tokens print usage instead of launching literal sessions, `mux join` and `mux j` resolve existing list entries without fallback and prompt interactively when no selector is given, `mux t <name>` and `mux tab <name>` are the explicit session-launch commands, mux-managed terminals use the canonical `mux <name>` title format for save and restore, `mux cleanup` removes orphan tmux sessions from the live `cmux` host after confirmation, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
+**Current state:** `bin/mux` now auto-saves on mux-managed session entry, `mux`, `mux help`, `mux h`, `mux -h`, and `mux --help` print usage, `mux list` and `mux l` expose numeric and letter selectors, `mux join` and `mux j` are the only selector-entry commands and resolve existing list entries without fallback, bare `mux 1` and `mux b`-style tokens are invalid and print usage, `mux join` and `mux j` prompt interactively when no selector is given, `mux t <name>` and `mux tab <name>` are the explicit session-launch commands, `mux save` and `mux s` rewrite the snapshot on demand, `mux restore` and `mux r` best-effort restore saved `mux <name>` terminals, mux-managed terminals use the canonical `mux <name>` title format for save and restore, `mux cleanup` removes orphan tmux sessions from the live `cmux` host after confirmation, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
 
 ## Remaining Work
 
@@ -34,25 +34,6 @@
 - Kill the tmux session for the resolved target.
 - Do not close the matching cmux tab as part of the command flow.
 - Document the command behavior and examples in `README.md`.
-
-### Task 5: Make `mux` Show Help and Add Non-Destructive Command Aliases
-
-**Standalone:** yes
-**Depends on:** none
-
-**Files:**
-- Update: `bin/mux`
-- Update: `README.md`
-- Update: `tests/run-tests.sh`
-
-**Goal:** make the CLI fully command-first for help and lookup commands.
-
-**Requirements:**
-- Make `mux`, `mux help`, `mux -h`, and `mux --help` show usage.
-- Add `mux l` as an alias for `mux list`.
-- Add `mux r` as an alias for `mux restore`.
-- Update tests for the new aliases and default help behavior.
-- Update `README.md` examples and usage text.
 
 ### Task 9: Add Non-Interactive `mux pick <selector>` and `mux p <selector>`
 
