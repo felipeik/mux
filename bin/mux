@@ -15,6 +15,7 @@ Commands:
   list
   save
   s
+  cleanup [--auto-approve]
   restore
 EOF
 }
@@ -218,6 +219,51 @@ tmux_session_names() {
   fi
 
   tmux list-sessions -F '#{session_name}' 2>/dev/null || true
+}
+
+list_contains_line() {
+  local needle="$1"
+  local haystack="$2"
+  local line
+
+  while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    if [ "$line" = "$needle" ]; then
+      return 0
+    fi
+  done <<EOF
+$haystack
+EOF
+
+  return 1
+}
+
+tracked_mux_sessions() {
+  local entries="$1"
+  local entry session
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    session="$(printf '%s\n' "$entry" | jq -r '.session')"
+    [ -n "$session" ] || continue
+    printf '%s\n' "$session"
+  done <<EOF
+$entries
+EOF
+}
+
+orphan_tmux_sessions() {
+  local tracked_sessions="$1"
+  local session
+
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    if ! list_contains_line "$session" "$tracked_sessions"; then
+      printf '%s\n' "$session"
+    fi
+  done <<EOF
+$(tmux_session_names)
+EOF
 }
 
 selector_display() {
@@ -455,6 +501,65 @@ $(jq -c '.workspaces[]?' "$state_file")
 EOF
 }
 
+cmd_cleanup() {
+  local auto_approve=0
+  local entries tracked_sessions orphan_sessions session response
+
+  case "${1:-}" in
+    "")
+      ;;
+    --auto-approve)
+      auto_approve=1
+      shift
+      ;;
+    *)
+      echo "mux cleanup accepts only --auto-approve" >&2
+      exit 1
+      ;;
+  esac
+
+  if [ "$#" -ne 0 ]; then
+    echo "mux cleanup accepts only --auto-approve" >&2
+    exit 1
+  fi
+
+  ensure_command cmux
+  ensure_command jq
+  ensure_command tmux
+
+  cmd_save >/dev/null
+  entries="$(live_mux_entries)"
+  tracked_sessions="$(tracked_mux_sessions "$entries")"
+  orphan_sessions="$(orphan_tmux_sessions "$tracked_sessions")"
+
+  if [ -z "$orphan_sessions" ]; then
+    printf 'nothing to cleanup\n'
+    return 0
+  fi
+
+  printf 'Orphan tmux sessions:\n'
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    printf '%s\n' "$session"
+  done <<EOF
+$orphan_sessions
+EOF
+
+  if [ "$auto_approve" -ne 1 ]; then
+    printf 'Type yes to delete these sessions: '
+    if ! IFS= read -r response || [ "$response" != "yes" ]; then
+      return 0
+    fi
+  fi
+
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    tmux kill-session -t "$session"
+  done <<EOF
+$orphan_sessions
+EOF
+}
+
 main() {
   case "${1:-}" in
     "")
@@ -471,6 +576,10 @@ main() {
     save|s)
       shift
       cmd_save "$@"
+      ;;
+    cleanup)
+      shift
+      cmd_cleanup "$@"
       ;;
     restore)
       shift

@@ -11,6 +11,8 @@ Standalone Bash CLI for restoring tmux-backed terminals inside cmux.
 - `mux <selector>` such as `mux 1` or `mux a` joins the matching listed mux tab when a selector match exists.
 - `mux -h`, `mux --help`, and `mux help` print usage.
 - `mux save` and `mux s` rewrite the saved snapshot for all current cmux workspaces.
+- `mux cleanup` lists tmux sessions that are not represented in the current live mux tree, asks for exact `yes`, and then deletes them.
+- `mux cleanup --auto-approve` skips the confirmation prompt and immediately deletes the listed orphan tmux sessions.
 - `mux restore` best-effort restores only saved `mux <name>` and `mux tab <name>` terminals in existing cmux workspaces.
 
 ## Selector Rules
@@ -34,6 +36,14 @@ Standalone Bash CLI for restoring tmux-backed terminals inside cmux.
 - If `cmux` is available, `mux list` reads the live `cmux tree --all --json` view.
 - If `cmux` is unavailable, `mux list` and selector-based joining fall back to the persisted state file.
 - Launch-time auto-save is skipped silently when `cmux` or `jq` is unavailable.
+- `mux cleanup` requires a live `cmux` host and does not run from the saved snapshot alone.
+
+## Cleanup
+
+- `mux cleanup` runs the save path first, then compares the live mux-managed session set against `tmux list-sessions`.
+- Any tmux session not represented in the current live mux tree is treated as an orphan and listed for deletion.
+- The interactive form deletes sessions only after exact `yes`.
+- `--auto-approve` is the only non-interactive bypass.
 
 ## State File
 

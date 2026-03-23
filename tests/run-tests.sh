@@ -1049,6 +1049,330 @@ EOF
   assert_contains "skipping workspace Missing" "$(cat "$temp_dir/stdout.txt")" "expected missing workspace notice"
 }
 
+test_mux_cleanup_requires_cmux() {
+  local temp_dir stub_dir output jq_bin
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  write_executable "$stub_dir/tmux" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" cleanup 2>&1 || true)"
+  assert_contains "missing required command: cmux" "$output" "expected mux cleanup to require cmux"
+}
+
+test_mux_cleanup_lists_orphans_and_skips_deletion_without_exact_yes() {
+  local temp_dir stub_dir output log_file state_file jq_bin
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  output="$temp_dir/output.txt"
+  log_file="$temp_dir/log.txt"
+  state_file="$temp_dir/state.json"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+orphan
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  printf 'no\n' | PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" cleanup >"$output" 2>&1 || true
+
+  assert_contains "orphan" "$(cat "$output")" "expected mux cleanup to list orphan sessions"
+  assert_contains "Type yes to delete these sessions:" "$(cat "$output")" "expected cleanup confirmation prompt"
+  case "$(cat "$log_file")" in
+    *"kill-session"*)
+      fail "expected cleanup to skip deletion when confirmation is not exact yes"
+      ;;
+  esac
+}
+
+test_mux_cleanup_kills_orphans_after_exact_yes() {
+  local temp_dir stub_dir output log_file state_file jq_bin log_contents
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  output="$temp_dir/output.txt"
+  log_file="$temp_dir/log.txt"
+  state_file="$temp_dir/state.json"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+orphan-1
+orphan-2
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  printf 'yes\n' | PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" cleanup >"$output" 2>&1 || true
+
+  log_contents="$(cat "$log_file")"
+  assert_contains "cmux:tree --all --json
+cmux:tree --all --json
+tmux:list-sessions -F #{session_name}" "$log_contents" "expected cleanup to save before comparing tmux sessions"
+  assert_contains "tmux:kill-session -t orphan-1" "$log_contents" "expected cleanup to delete first orphan"
+  assert_contains "tmux:kill-session -t orphan-2" "$log_contents" "expected cleanup to delete second orphan"
+  case "$log_contents" in
+    *"tmux:kill-session -t backend"*)
+      fail "expected cleanup to preserve tracked mux sessions"
+      ;;
+  esac
+  assert_json_filter_equals "$state_file" '.workspaces[0].entries[0].session' "backend"
+}
+
+test_mux_cleanup_auto_approve_skips_prompt() {
+  local temp_dir stub_dir output log_file state_file jq_bin
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  output="$temp_dir/output.txt"
+  log_file="$temp_dir/log.txt"
+  state_file="$temp_dir/state.json"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+orphan
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" cleanup --auto-approve >"$output" 2>&1 || true
+
+  assert_contains "tmux:kill-session -t orphan" "$(cat "$log_file")" "expected cleanup --auto-approve to delete orphan sessions"
+  case "$(cat "$output")" in
+    *"Type yes to delete these sessions:"*)
+      fail "expected --auto-approve to skip the confirmation prompt"
+      ;;
+  esac
+}
+
+test_mux_cleanup_prints_nothing_to_cleanup_when_all_sessions_are_tracked() {
+  local temp_dir stub_dir output log_file state_file jq_bin
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  output="$temp_dir/output.txt"
+  log_file="$temp_dir/log.txt"
+  state_file="$temp_dir/state.json"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" cleanup >"$output" 2>&1 || true
+
+  assert_contains "nothing to cleanup" "$(cat "$output")" "expected cleanup to report no orphan sessions"
+  case "$(cat "$log_file")" in
+    *"kill-session"*)
+      fail "expected cleanup to avoid deletion when no orphan sessions exist"
+      ;;
+  esac
+}
+
 test_readme_documents_supported_commands() {
   local readme
   readme="$(cat "$ROOT_DIR/README.md")"
@@ -1056,6 +1380,8 @@ test_readme_documents_supported_commands() {
   assert_contains "mux tab <name>" "$readme" "expected tab usage in README"
   assert_contains "mux save" "$readme" "expected save usage in README"
   assert_contains "mux s" "$readme" "expected short save usage in README"
+  assert_contains "mux cleanup" "$readme" "expected cleanup usage in README"
+  assert_contains "mux cleanup --auto-approve" "$readme" "expected cleanup auto-approve usage in README"
   assert_contains "mux restore" "$readme" "expected restore usage in README"
 }
 
@@ -1078,6 +1404,11 @@ main() {
   test_mux_list_and_index_work_without_cmux_using_saved_state
   test_save_and_s_rewrite_state_with_only_mux_tabs
   test_restore_respawns_matching_saved_mux_tabs_best_effort
+  test_mux_cleanup_requires_cmux
+  test_mux_cleanup_lists_orphans_and_skips_deletion_without_exact_yes
+  test_mux_cleanup_kills_orphans_after_exact_yes
+  test_mux_cleanup_auto_approve_skips_prompt
+  test_mux_cleanup_prints_nothing_to_cleanup_when_all_sessions_are_tracked
   test_readme_documents_supported_commands
   echo "PASS"
 }
