@@ -4,11 +4,14 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: mux <name>
+       mux <index>
        mux <command>
 
 Commands:
   <name>
+  <index>
   tab <name>
+  list
   persist
   restore
 EOF
@@ -120,6 +123,146 @@ open_session() {
   rename_cmux_tab "$title"
   best_effort_persist_on_launch
   exec tmux new-session -A -s "$name"
+}
+
+live_mux_entries() {
+  ensure_command jq
+
+  if command -v cmux >/dev/null 2>&1; then
+    cmux tree --all --json | jq -c '
+      [
+        .windows[]?.workspaces[]? as $workspace |
+        $workspace.panes[]? as $pane |
+        $pane.surfaces[]? |
+        select(.type == "terminal" and (.title | test("^mux( tab)? .+"))) |
+        {
+          workspace_title: $workspace.title,
+          pane_index: $pane.index,
+          surface_index_in_pane: .index_in_pane,
+          title: .title,
+          session: (.title | capture("^mux( tab)? (?<session>.+)$").session)
+        }
+      ]
+      | sort_by(.workspace_title, .pane_index, .surface_index_in_pane)
+      | .[]
+    '
+    return
+  fi
+
+  state_file="$(state_file_path)"
+  if [ ! -f "$state_file" ]; then
+    echo "missing state file: $state_file" >&2
+    echo "run: mux persist" >&2
+    exit 1
+  fi
+
+  jq -c '
+    [
+      .workspaces[]? as $workspace |
+      $workspace.entries[]? |
+      {
+        workspace_title: $workspace.title,
+        pane_index: .pane_index,
+        surface_index_in_pane: .surface_index_in_pane,
+        title: .title,
+        session: .session
+      }
+    ]
+    | sort_by(.workspace_title, .pane_index, .surface_index_in_pane)
+    | .[]
+  ' "$state_file"
+}
+
+cmd_list() {
+  local entries index=0
+  local entry workspace title session
+  local width_index width_workspace width_title width_session
+  local dashes_index dashes_workspace dashes_title dashes_session
+
+  entries="$(live_mux_entries)"
+
+  width_index=1
+  width_workspace=9
+  width_title=5
+  width_session=7
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    index=$((index + 1))
+    workspace="$(printf '%s\n' "$entry" | jq -r '.workspace_title')"
+    title="$(printf '%s\n' "$entry" | jq -r '.title')"
+    session="$(printf '%s\n' "$entry" | jq -r '.session')"
+    [ "${#index}" -gt "$width_index" ] && width_index="${#index}"
+    [ "${#workspace}" -gt "$width_workspace" ] && width_workspace="${#workspace}"
+    [ "${#title}" -gt "$width_title" ] && width_title="${#title}"
+    [ "${#session}" -gt "$width_session" ] && width_session="${#session}"
+  done <<EOF
+$entries
+EOF
+
+  dashes_index="$(printf '%*s' "$width_index" '' | tr ' ' '-')"
+  dashes_workspace="$(printf '%*s' "$width_workspace" '' | tr ' ' '-')"
+  dashes_title="$(printf '%*s' "$width_title" '' | tr ' ' '-')"
+  dashes_session="$(printf '%*s' "$width_session" '' | tr ' ' '-')"
+
+  printf '%-*s  %-*s  %-*s  %-*s\n' \
+    "$width_index" "#" \
+    "$width_workspace" "Workspace" \
+    "$width_title" "Title" \
+    "$width_session" "Session"
+  printf '%-*s  %-*s  %-*s  %-*s\n' \
+    "$width_index" "$dashes_index" \
+    "$width_workspace" "$dashes_workspace" \
+    "$width_title" "$dashes_title" \
+    "$width_session" "$dashes_session"
+
+  index=0
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    index=$((index + 1))
+    workspace="$(printf '%s\n' "$entry" | jq -r '.workspace_title')"
+    title="$(printf '%s\n' "$entry" | jq -r '.title')"
+    session="$(printf '%s\n' "$entry" | jq -r '.session')"
+    printf '%-*d  %-*s  %-*s  %-*s\n' \
+      "$width_index" "$index" \
+      "$width_workspace" "$workspace" \
+      "$width_title" "$title" \
+      "$width_session" "$session"
+  done <<EOF
+$entries
+EOF
+}
+
+cmd_index() {
+  local target="${1:-}"
+  local index=0
+  local entries entry session title
+
+  if ! is_exact_integer "$target"; then
+    echo "mux index must be an integer" >&2
+    exit 1
+  fi
+
+  entries="$(live_mux_entries)"
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    index=$((index + 1))
+    if [ "$index" -eq "$target" ]; then
+      session="$(printf '%s\n' "$entry" | jq -r '.session')"
+      title="$(printf '%s\n' "$entry" | jq -r '.title')"
+      break
+    fi
+  done <<EOF
+$entries
+EOF
+
+  if [ -n "${session:-}" ] && [ -n "${title:-}" ]; then
+    open_session "$session" "$title"
+  fi
+
+  echo "unknown mux list index: $target" >&2
+  exit 1
 }
 
 cmd_tab() {
@@ -255,6 +398,10 @@ main() {
       shift
       cmd_tab "$@"
       ;;
+    list)
+      shift
+      cmd_list "$@"
+      ;;
     persist)
       shift
       cmd_persist "$@"
@@ -267,7 +414,11 @@ main() {
       usage
       ;;
     *)
-      cmd_name "$@"
+      if is_exact_integer "${1:-}"; then
+        cmd_index "$1"
+      else
+        cmd_name "$@"
+      fi
       ;;
   esac
 }

@@ -2,15 +2,25 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Add automatic persistence on mux session entry, numeric tab selection via `mux list` and `mux <index>`, and a research-backed path for automatic persistence on tab lifecycle changes.
+**Goal:** Add automatic persistence on mux session entry, numeric tab selection via `mux list` and `mux <index>`, outside-`cmux` tmux-only attach behavior, and a research-backed path for automatic persistence on tab lifecycle changes.
 
-**Architecture:** Keep `bin/mux` as the single Bash entrypoint and extend the shell test harness first. Opening a mux session should become a small workflow: validate the identifier, rename the cmux tab, best-effort persist the current cmux tree, then enter the tmux session. Numeric arguments will be reserved for list selection only, and `mux list` will derive its output from the live `cmux tree --all --json` view rather than the saved state file so the numbering reflects the current UI.
+**Architecture:** Keep `bin/mux` as the single Bash entrypoint and extend the shell test harness first. Opening a mux session inside `cmux` should become a small workflow: validate the identifier, rename the cmux tab, best-effort persist the current cmux tree, then enter the tmux session. Numeric arguments will be reserved for list selection only, and `mux list` will derive its output from the live `cmux tree --all --json` view rather than the saved state file so the numbering reflects the current UI. When `mux` runs outside `cmux`, it should skip cmux-specific behavior and simply attach to the requested tmux session so remote SSH shells can still use `mux <name>`.
 
 **Tech Stack:** Bash, jq, cmux CLI/socket API, tmux CLI/hooks, shell-based test scripts
 
 ---
 
-### Task 1: Add Failing Tests for Auto-Persist and Integer Validation
+## Current Status
+
+- Completed: automatic persist on `mux <name>` and `mux tab <name>`
+- Completed: exact integer bare arguments are reserved for list selection
+- Completed: `mux list` and `mux <index>`
+- Pending: research automatic persistence for tab lifecycle changes
+- Pending: refresh user-facing docs
+
+---
+
+### Task 1: Add Failing Tests for Auto-Persist and Integer Validation (Completed)
 
 **Files:**
 - Modify: `bin/mux`
@@ -22,8 +32,8 @@ Add shell tests that verify:
 
 - `mux backend` calls the persist workflow before entering tmux
 - `mux tab backend` calls the persist workflow before entering tmux
-- `mux 1` does not create or attach to a session literally named `1`
-- exact integer names are rejected for `mux tab 1` and `mux 1`
+- exact integer bare arguments are reserved for list selection
+- exact integer names are rejected for `mux tab 1`
 - non-integer names such as `api-1` remain valid
 
 Use stubbed `cmux`, `jq`, and `tmux` binaries in `tests/run-tests.sh` so the test can assert call order and exact arguments.
@@ -48,7 +58,7 @@ git add tests/run-tests.sh
 git commit -m "test: cover mux auto-persist and integer validation"
 ```
 
-### Task 2: Implement Launch Workflow and Exact-Integer Rejection
+### Task 2: Implement Launch Workflow and Exact-Integer Rejection (Completed)
 
 **Files:**
 - Modify: `bin/mux`
@@ -90,7 +100,7 @@ git add bin/mux tests/run-tests.sh
 git commit -m "feat: auto-persist when opening mux sessions"
 ```
 
-### Task 3: Add Failing Tests for `mux list` and Numeric Selection
+### Task 3: Add Failing Tests for `mux list` and Numeric Selection (Completed)
 
 **Files:**
 - Modify: `bin/mux`
@@ -133,7 +143,7 @@ git add tests/run-tests.sh
 git commit -m "test: cover mux list and numeric session selection"
 ```
 
-### Task 4: Implement `mux list` and `mux <index>`
+### Task 4: Implement `mux list` and `mux <index>` (Completed)
 
 **Files:**
 - Modify: `bin/mux`
@@ -267,6 +277,54 @@ Expected: PASS for the full shell suite.
 ```bash
 git add README.md tests/run-tests.sh
 git commit -m "docs: document mux list and auto-persist behavior"
+```
+
+### Task 7: Support Direct Tmux Attach Outside `cmux`
+
+**Files:**
+- Modify: `bin/mux`
+- Modify: `tests/run-tests.sh`
+- Modify: `README.md`
+
+**Step 1: Write the failing test**
+
+Add shell tests that simulate invoking `mux` without a `cmux` context and verify:
+
+- `mux backend` skips cmux tab rename/persist calls
+- `mux backend` directly attaches to tmux session `backend`
+- `mux tab backend` follows the same tmux-only attach path outside `cmux`
+- the existing rename-and-persist workflow still runs when invoked inside `cmux`
+
+Use the test harness stubs to assert that no `cmux` commands are attempted in the outside-`cmux` path.
+
+**Step 2: Run test to verify it fails**
+
+Run: `bash tests/run-tests.sh`
+Expected: FAIL because the current CLI assumes `cmux` integration for mux-managed session entry.
+
+**Step 3: Write minimal implementation**
+
+Update `bin/mux` so:
+
+- session-entry commands detect whether `mux` is running inside `cmux`
+- outside `cmux`, `mux <name>` and `mux tab <name>` skip cmux-specific commands
+- outside `cmux`, the command simply attaches to tmux session `<name>`
+- inside `cmux`, the current rename-and-persist entry workflow remains unchanged
+
+Implementation note:
+
+- preserve the remote-shell use case: SSH into a machine, run `mux XXX`, and attach directly to tmux session `XXX` without requiring `cmux`
+
+**Step 4: Run test to verify it passes**
+
+Run: `bash tests/run-tests.sh`
+Expected: PASS for both the inside-`cmux` and outside-`cmux` entry flows.
+
+**Step 5: Commit**
+
+```bash
+git add bin/mux tests/run-tests.sh README.md
+git commit -m "feat: support mux attach outside cmux"
 ```
 
 ## Research Notes
