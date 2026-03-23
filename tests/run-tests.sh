@@ -101,11 +101,11 @@ EOF
   "$ROOT_DIR/bin/mux" tab claude-123 || true
 
   assert_file_exists "$log_file"
-  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux tab claude-123" "$(cat "$log_file")" "expected cmux tab rename"
+  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux claude-123" "$(cat "$log_file")" "expected canonical cmux tab rename"
   assert_contains "tmux:new-session -A -s claude-123" "$(cat "$log_file")" "expected tmux new-session -A -s"
 }
 
-test_bare_name_uses_tmux_new_session_and_renames_cmux_tab() {
+test_t_uses_tmux_new_session_and_renames_cmux_tab() {
   local temp_dir stub_dir log_file
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -126,14 +126,34 @@ EOF
   CMUX_WORKSPACE_ID="workspace:1" \
   CMUX_SURFACE_ID="surface:9" \
   MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" claude-123 || true
+  "$ROOT_DIR/bin/mux" t claude-123 || true
 
   assert_file_exists "$log_file"
-  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux claude-123" "$(cat "$log_file")" "expected cmux tab rename for bare alias"
-  assert_contains "tmux:new-session -A -s claude-123" "$(cat "$log_file")" "expected tmux new-session -A -s for bare alias"
+  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux claude-123" "$(cat "$log_file")" "expected cmux tab rename for t"
+  assert_contains "tmux:new-session -A -s claude-123" "$(cat "$log_file")" "expected tmux new-session -A -s for t"
 }
 
-test_mux_launch_persists_before_entering_tmux() {
+test_bare_name_requires_explicit_launch_command() {
+  local temp_dir stub_dir output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  mkdir -p "$stub_dir"
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+exit 1
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" backend 2>&1 || true)"
+  assert_contains "usage: mux" "$output" "expected bare deprecated launch to print usage"
+}
+
+test_mux_t_launch_persists_before_entering_tmux() {
   local temp_dir stub_dir log_file tree_json
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -169,12 +189,12 @@ EOF
   CMUX_WORKSPACE_ID="workspace:1" \
   CMUX_SURFACE_ID="surface:9" \
   MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" backend || true
+  "$ROOT_DIR/bin/mux" t backend || true
 
   assert_file_exists "$log_file"
   assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux backend" "$(cat "$log_file")" "expected tab rename before launch"
   assert_contains "cmux:tree --all --json" "$(cat "$log_file")" "expected persist tree snapshot before tmux launch"
-  assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected tmux new-session for bare launch"
+  assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected tmux new-session for t launch"
 }
 
 test_mux_tab_launch_persists_before_entering_tmux() {
@@ -216,12 +236,12 @@ EOF
   "$ROOT_DIR/bin/mux" tab backend || true
 
   assert_file_exists "$log_file"
-  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux tab backend" "$(cat "$log_file")" "expected tab rename before legacy launch"
-  assert_contains "cmux:tree --all --json" "$(cat "$log_file")" "expected persist tree snapshot before legacy tmux launch"
-  assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected tmux new-session for legacy launch"
+  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux backend" "$(cat "$log_file")" "expected canonical tab rename before launch"
+  assert_contains "cmux:tree --all --json" "$(cat "$log_file")" "expected persist tree snapshot before tmux launch"
+  assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected tmux new-session for tab launch"
 }
 
-test_exact_integer_tab_names_still_launch() {
+test_launch_commands_treat_literal_names_as_session_names() {
   local temp_dir stub_dir log_file output
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -238,43 +258,29 @@ EOF
 printf 'cmux:%s\n' "\$*" >>"$log_file"
 EOF
 
-  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" tab 1 2>&1 || true)"
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" t 1 2>&1 || true)"
   case "$output" in
     *"integer"*)
-      fail "expected mux tab 1 to be treated as a valid session name"
+      fail "expected mux t 1 to be treated as a valid session name"
       ;;
   esac
-  assert_file_exists "$log_file"
-  assert_contains "cmux:rename-tab" "$(cat "$log_file")" "expected mux tab 1 to rename the tab"
-  assert_contains "tmux:new-session -A -s 1" "$(cat "$log_file")" "expected mux tab 1 to launch session 1"
-}
-
-test_non_integer_names_still_launch() {
-  local temp_dir stub_dir log_file
-  temp_dir="$(make_temp_dir)"
-  stub_dir="$temp_dir/bin"
-  log_file="$temp_dir/log.txt"
-  mkdir -p "$stub_dir"
-
-  write_executable "$stub_dir/tmux" <<EOF
-#!/usr/bin/env bash
-printf 'tmux:%s\n' "\$*" >>"$log_file"
-EOF
-
-  write_executable "$stub_dir/cmux" <<EOF
-#!/usr/bin/env bash
-printf 'cmux:%s\n' "\$*" >>"$log_file"
-EOF
+  PATH="$stub_dir:$PATH" \
+  CMUX_WORKSPACE_ID="workspace:1" \
+  CMUX_SURFACE_ID="surface:9" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" t a || true
 
   PATH="$stub_dir:$PATH" \
   CMUX_WORKSPACE_ID="workspace:1" \
   CMUX_SURFACE_ID="surface:9" \
   MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" api-1 || true
+  "$ROOT_DIR/bin/mux" tab api-1 || true
 
   assert_file_exists "$log_file"
-  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux api-1" "$(cat "$log_file")" "expected non-integer session rename"
-  assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected non-integer session launch"
+  assert_contains "tmux:new-session -A -s 1" "$(cat "$log_file")" "expected mux t 1 to launch session 1"
+  assert_contains "tmux:new-session -A -s a" "$(cat "$log_file")" "expected mux t a to launch session a"
+  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux api-1" "$(cat "$log_file")" "expected canonical session rename"
+  assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected mux tab api-1 to launch session api-1"
 }
 
 test_mux_list_prints_numbered_mux_tabs_only() {
@@ -999,7 +1005,7 @@ EOF
   esac
 }
 
-test_mux_numeric_selection_rejects_unknown_index() {
+test_mux_unknown_selectors_error_without_launching_sessions() {
   local temp_dir stub_dir output
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -1024,50 +1030,10 @@ exit 1
 EOF
 
   output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" 999 2>&1 || true)"
-  case "$output" in
-    *"unknown mux list index"*)
-      fail "expected mux 999 to fall back to a literal session name when no list match exists"
-      ;;
-  esac
-}
+  assert_contains "usage: mux" "$output" "expected mux 999 to print usage when no selector matches"
 
-test_mux_unmatched_numeric_and_letter_fall_back_to_session_names() {
-  local temp_dir stub_dir log_file
-  temp_dir="$(make_temp_dir)"
-  stub_dir="$temp_dir/bin"
-  log_file="$temp_dir/log.txt"
-  mkdir -p "$stub_dir"
-
-  cat >"$temp_dir/tree.json" <<'EOF'
-{"windows":[]}
-EOF
-
-  write_executable "$stub_dir/cmux" <<EOF
-#!/usr/bin/env bash
-if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
-  cat "$temp_dir/tree.json"
-  exit 0
-fi
-printf 'cmux:%s\n' "\$*" >>"$log_file"
-exit 0
-EOF
-
-  write_executable "$stub_dir/tmux" <<EOF
-#!/usr/bin/env bash
-printf 'tmux:%s\n' "\$*" >>"$log_file"
-EOF
-
-  PATH="$stub_dir:$PATH" \
-  MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" 999 || true
-
-  PATH="$stub_dir:$PATH" \
-  MUX_STATE_FILE="$temp_dir/state.json" \
-  "$ROOT_DIR/bin/mux" z || true
-
-  assert_file_exists "$log_file"
-  assert_contains "tmux:new-session -A -s 999" "$(cat "$log_file")" "expected unmatched numeric token to remain a literal session name"
-  assert_contains "tmux:new-session -A -s z" "$(cat "$log_file")" "expected unmatched letter token to remain a literal session name"
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" z 2>&1 || true)"
+  assert_contains "usage: mux" "$output" "expected mux z to print usage when no selector matches"
 }
 
 test_mux_list_and_index_work_without_cmux_using_saved_state() {
@@ -1144,7 +1110,7 @@ EOF
   assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected numeric selection to work from saved state without cmux"
 }
 
-test_save_and_s_rewrite_state_with_only_mux_tabs() {
+test_save_and_s_rewrite_state_with_only_canonical_mux_tabs() {
   local temp_dir stub_dir state_file tree_json
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -1167,7 +1133,7 @@ test_save_and_s_rewrite_state_with_only_mux_tabs() {
                   "ref": "surface:10",
                   "pane_ref": "pane:1",
                   "type": "terminal",
-                  "title": "mux tab claude-123",
+                  "title": "mux claude-123",
                   "index_in_pane": 0
                 }
               ]
@@ -1179,8 +1145,15 @@ test_save_and_s_rewrite_state_with_only_mux_tabs() {
                   "ref": "surface:11",
                   "pane_ref": "pane:2",
                   "type": "terminal",
-                  "title": "lazygit",
+                  "title": "mux tab legacy",
                   "index_in_pane": 0
+                },
+                {
+                  "ref": "surface:12",
+                  "pane_ref": "pane:2",
+                  "type": "terminal",
+                  "title": "lazygit",
+                  "index_in_pane": 1
                 }
               ]
             }
@@ -1258,7 +1231,7 @@ EOF
   assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].session' "backend"
 }
 
-test_restore_respawns_matching_saved_mux_tabs_best_effort() {
+test_restore_respawns_matching_saved_canonical_mux_tabs_best_effort() {
   local temp_dir stub_dir state_file log_file
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -1274,7 +1247,7 @@ test_restore_respawns_matching_saved_mux_tabs_best_effort() {
       "title": "Alpha",
       "entries": [
         {
-          "title": "mux tab claude-123",
+          "title": "mux claude-123",
           "session": "claude-123",
           "pane_index": 0,
           "surface_index_in_pane": 0
@@ -1296,7 +1269,7 @@ test_restore_respawns_matching_saved_mux_tabs_best_effort() {
       "title": "Missing",
       "entries": [
         {
-          "title": "mux tab ignored",
+          "title": "mux ignored",
           "session": "ignored",
           "pane_index": 0,
           "surface_index_in_pane": 0
@@ -1322,7 +1295,7 @@ EOF
                 {
                   "ref": "surface:100",
                   "type": "terminal",
-                  "title": "mux tab claude-123",
+                  "title": "mux claude-123",
                   "index_in_pane": 0
                 }
               ]
@@ -1379,8 +1352,8 @@ EOF
 
   assert_contains "respawn:respawn-pane --workspace workspace:10 --surface surface:100 --command" "$(cat "$log_file")" "expected restore for Alpha"
   assert_contains "respawn:respawn-pane --workspace workspace:20 --surface surface:200 --command" "$(cat "$log_file")" "expected restore attempt for Beta"
-  assert_contains "'$ROOT_DIR/bin/mux' tab 'claude-123'" "$(cat "$log_file")" "expected legacy restore command"
-  assert_contains "'$ROOT_DIR/bin/mux' 'backend'" "$(cat "$log_file")" "expected alias restore command"
+  assert_contains "'$ROOT_DIR/bin/mux' tab 'claude-123'" "$(cat "$log_file")" "expected explicit restore command for Alpha"
+  assert_contains "'$ROOT_DIR/bin/mux' tab 'backend'" "$(cat "$log_file")" "expected explicit restore command for Beta"
   assert_contains "skipping workspace Missing" "$(cat "$temp_dir/stdout.txt")" "expected missing workspace notice"
 }
 
@@ -1711,7 +1684,7 @@ EOF
 test_readme_documents_supported_commands() {
   local readme
   readme="$(cat "$ROOT_DIR/README.md")"
-  assert_contains "mux <name>" "$readme" "expected bare alias usage in README"
+  assert_contains "mux t <name>" "$readme" "expected t usage in README"
   assert_contains "mux tab <name>" "$readme" "expected tab usage in README"
   assert_contains "mux join <selector>" "$readme" "expected join usage in README"
   assert_contains "mux j <selector>" "$readme" "expected join alias usage in README"
@@ -1720,17 +1693,22 @@ test_readme_documents_supported_commands() {
   assert_contains "mux cleanup" "$readme" "expected cleanup usage in README"
   assert_contains "mux cleanup --auto-approve" "$readme" "expected cleanup auto-approve usage in README"
   assert_contains "mux restore" "$readme" "expected restore usage in README"
+  case "$readme" in
+    *"mux <name> attaches or creates a tmux session"*)
+      fail "expected README to drop bare mux <name> launch docs"
+      ;;
+  esac
 }
 
 main() {
   test_cli_help_flags_print_usage
   test_mux_with_no_args_matches_mux_list
   test_tab_uses_tmux_new_session_and_renames_cmux_tab
-  test_bare_name_uses_tmux_new_session_and_renames_cmux_tab
-  test_mux_launch_persists_before_entering_tmux
+  test_t_uses_tmux_new_session_and_renames_cmux_tab
+  test_bare_name_requires_explicit_launch_command
+  test_mux_t_launch_persists_before_entering_tmux
   test_mux_tab_launch_persists_before_entering_tmux
-  test_exact_integer_tab_names_still_launch
-  test_non_integer_names_still_launch
+  test_launch_commands_treat_literal_names_as_session_names
   test_mux_list_prints_numbered_mux_tabs_only
   test_mux_list_hides_conflict_marker_when_no_selector_conflicts_exist
   test_mux_numeric_selection_attaches_by_list_index
@@ -1741,11 +1719,10 @@ main() {
   test_mux_join_without_selector_reads_prompt_in_interactive_mode
   test_mux_join_without_selector_prints_list_and_errors_in_non_interactive_mode
   test_mux_numeric_selection_does_not_launch_tmux_from_list_stdin
-  test_mux_numeric_selection_rejects_unknown_index
-  test_mux_unmatched_numeric_and_letter_fall_back_to_session_names
+  test_mux_unknown_selectors_error_without_launching_sessions
   test_mux_list_and_index_work_without_cmux_using_saved_state
-  test_save_and_s_rewrite_state_with_only_mux_tabs
-  test_restore_respawns_matching_saved_mux_tabs_best_effort
+  test_save_and_s_rewrite_state_with_only_canonical_mux_tabs
+  test_restore_respawns_matching_saved_canonical_mux_tabs_best_effort
   test_mux_cleanup_requires_cmux
   test_mux_cleanup_lists_orphans_and_skips_deletion_without_exact_yes
   test_mux_cleanup_kills_orphans_after_exact_yes

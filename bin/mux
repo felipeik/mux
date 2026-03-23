@@ -4,15 +4,16 @@ set -euo pipefail
 usage() {
   cat <<'EOF'
 usage: mux
-       mux <name>
        mux <index>
+       mux <key>
        mux <command>
 
 Commands:
-  <name>
   <index>
   join [<selector>]
   j [<selector>]
+  <key>
+  t <name>
   tab <name>
   list
   save
@@ -71,19 +72,9 @@ is_exact_integer() {
   esac
 }
 
-validate_session_name() {
-  local name="$1"
-
-  if is_exact_integer "$name"; then
-    echo "exact integer session names are reserved for mux list indexes" >&2
-    exit 1
-  fi
-}
-
 title_session() {
   local title="$1"
   case "$title" in
-    "mux tab "*) printf '%s\n' "${title#mux tab }" ;;
     "mux "*) printf '%s\n' "${title#mux }" ;;
     *) return 1 ;;
   esac
@@ -96,17 +87,7 @@ command_string_for_title() {
 
   session="$(title_session "$title")" || return 1
 
-  case "$title" in
-    "mux tab "*)
-      printf '%s tab %s' "$(shell_quote "$self_path")" "$(shell_quote "$session")"
-      ;;
-    "mux "*)
-      printf '%s %s' "$(shell_quote "$self_path")" "$(shell_quote "$session")"
-      ;;
-    *)
-      return 1
-      ;;
-  esac
+  printf '%s tab %s' "$(shell_quote "$self_path")" "$(shell_quote "$session")"
 }
 
 best_effort_save_on_launch() {
@@ -190,13 +171,17 @@ live_mux_entries() {
         .windows[]?.workspaces[]? as $workspace |
         $workspace.panes[]? as $pane |
         $pane.surfaces[]? |
-        select(.type == "terminal" and (.title | test("^mux( tab)? .+"))) |
+        select(
+          .type == "terminal"
+          and (.title | startswith("mux "))
+          and (.title | startswith("mux tab ") | not)
+        ) |
         {
           workspace_title: $workspace.title,
           pane_index: $pane.index,
           surface_index_in_pane: .index_in_pane,
           title: .title,
-          session: (.title | capture("^mux( tab)? (?<session>.+)$").session)
+          session: (.title | ltrimstr("mux "))
         }
       ]
       | sort_by(.workspace_title, .pane_index, .surface_index_in_pane)
@@ -215,7 +200,11 @@ live_mux_entries() {
   jq -c '
     [
       .workspaces[]? as $workspace |
-      $workspace.entries[]? |
+      $workspace.entries[]?
+      | select(
+          (.title | startswith("mux "))
+          and (.title | startswith("mux tab ") | not)
+        ) |
       {
         workspace_title: $workspace.title,
         pane_index: .pane_index,
@@ -341,31 +330,35 @@ $entries
 EOF
 }
 
-cmd_tab() {
+cmd_launch() {
   local name="${1:-}"
+  local command_name="${2:-tab}"
+
   if [ -z "$name" ]; then
-    echo "mux tab requires a session name" >&2
+    echo "mux $command_name requires a session name" >&2
     exit 1
-  fi
-
-  open_session "$name" "mux tab $name"
-}
-
-cmd_name() {
-  local name="${1:-}"
-  local entry session title
-  if [ -z "$name" ]; then
-    echo "mux requires a session name" >&2
-    exit 1
-  fi
-
-  if entry="$(find_entry_by_selector "$name")"; then
-    session="$(printf '%s\n' "$entry" | jq -r '.session')"
-    title="$(printf '%s\n' "$entry" | jq -r '.title')"
-    open_session "$session" "$title"
   fi
 
   open_session "$name" "mux $name"
+}
+
+cmd_selector() {
+  local selector="${1:-}"
+  local entry session title
+
+  if [ -z "$selector" ]; then
+    usage >&2
+    exit 1
+  fi
+
+  if entry="$(find_entry_by_selector "$selector")"; then
+    session="$(printf '%s\n' "$entry" | jq -r '.session')"
+    title="$(printf '%s\n' "$entry" | jq -r '.title')"
+    join_session "$session" "$title"
+  fi
+
+  usage >&2
+  exit 1
 }
 
 is_interactive_terminal() {
@@ -438,10 +431,14 @@ cmd_save() {
           entries: [
             $workspace.panes[]? as $pane |
             $pane.surfaces[]? |
-            select(.type == "terminal" and (.title | test("^mux( tab)? .+"))) |
+            select(
+              .type == "terminal"
+              and (.title | startswith("mux "))
+              and (.title | startswith("mux tab ") | not)
+            ) |
             {
               title: .title,
-              session: (.title | capture("^mux( tab)? (?<session>.+)$").session),
+              session: (.title | ltrimstr("mux ")),
               pane_index: $pane.index,
               surface_index_in_pane: .index_in_pane
             }
@@ -518,7 +515,13 @@ cmd_restore() {
         printf 'skipping restore for %s: %s\n' "$workspace_title" "$session"
       fi
     done <<EOF
-$(printf '%s\n' "$workspace_json" | jq -c '.entries[]?')
+$(printf '%s\n' "$workspace_json" | jq -c '
+  .entries[]?
+  | select(
+      (.title | startswith("mux "))
+      and (.title | startswith("mux tab ") | not)
+    )
+')
 EOF
   done <<EOF
 $(jq -c '.workspaces[]?' "$state_file")
@@ -591,7 +594,11 @@ main() {
       ;;
     tab)
       shift
-      cmd_tab "$@"
+      cmd_launch "${1:-}" "tab"
+      ;;
+    t)
+      shift
+      cmd_launch "${1:-}" "t"
       ;;
     join|j)
       shift
@@ -617,7 +624,7 @@ main() {
       usage
       ;;
     *)
-      cmd_name "$@"
+      cmd_selector "$@"
       ;;
   esac
 }

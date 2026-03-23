@@ -1,6 +1,6 @@
 # Mux Backlog
 
-**Current state:** `bin/mux` now auto-saves on mux-managed session entry, `mux save` and `mux s` rewrite the snapshot on demand, `mux list` exposes numeric and letter selectors, bare selectors fall back to literal tmux session names when no listed mux tab matches, `mux join` and `mux j` resolve existing list entries without fallback, no-arg `mux join` prompts interactively and prints the list plus an error in non-interactive contexts, `mux cleanup` removes orphan tmux sessions from the live `cmux` host after confirmation, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
+**Current state:** `bin/mux` now auto-saves on mux-managed session entry, `mux save` and `mux s` rewrite the snapshot on demand, `mux list` exposes numeric and letter selectors, bare selector matches still join existing mux entries, unmatched bare tokens print usage instead of launching literal sessions, `mux join` and `mux j` resolve existing list entries without fallback and prompt interactively when no selector is given, `mux t <name>` and `mux tab <name>` are the explicit session-launch commands, mux-managed terminals use the canonical `mux <name>` title format for save and restore, `mux cleanup` removes orphan tmux sessions from the live `cmux` host after confirmation, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
 
 ## Remaining Work
 
@@ -54,42 +54,44 @@
 - Update tests for the new aliases and default help behavior.
 - Update `README.md` examples and usage text.
 
-### Task 6: Remove Bare `mux <name>` and Make `t`/`tab` the Only Session-Launch Commands
+### Task 9: Add Non-Interactive `mux pick <selector>` and `mux p <selector>`
 
-**Standalone:** no
-**Depends on:** Task 5
+**Standalone:** yes
+**Depends on:** none
 
 **Files:**
 - Update: `bin/mux`
 - Update: `README.md`
 - Update: `tests/run-tests.sh`
 
-**Goal:** remove implicit bare-name launching and require an explicit launch command.
+**Goal:** add a selector-only command that resolves existing mux list entries without creating new sessions.
 
 **Requirements:**
-- Remove bare `mux <name>` as a supported way to open or create tmux sessions.
-- Support `mux t <name>` and `mux tab <name>` as the only session-launch commands.
-- Make `mux t 1` and `mux t a` treat the argument as a literal tmux session name rather than a list selector.
-- Update tests for the removed bare-name behavior and the new `t` alias.
+- Add `mux pick` and `mux p` as selector commands.
+- Support `mux pick 1`, `mux pick a`, and similar direct selectors without prompting.
+- Keep `mux pick` selector-only: it must resolve existing mux list entries and never create a new tmux session as a fallback.
+- Return a clear error when the requested selector does not match a listed mux entry.
+- Update tests for direct selector behavior and no-fallback behavior.
 - Update `README.md` examples and usage text.
 
-### Task 7: Standardize Session Tab Titles as `mux <name>`
+### Task 10: Add Interactive `mux pick` with No Selector
 
 **Standalone:** no
-**Depends on:** Task 6
+**Depends on:** Task 9
 
 **Files:**
 - Update: `bin/mux`
 - Update: `README.md`
 - Update: `tests/run-tests.sh`
 
-**Goal:** make all session-launch commands use the same visible tab title format.
+**Goal:** make `mux pick` interactive when no selector is passed.
 
 **Requirements:**
-- Make both `mux t <name>` and `mux tab <name>` rename the visible tab to `mux <name>`.
-- Ensure persistence and restore still recognize and handle standardized `mux <name>` titles.
-- Update tests for the standardized title behavior.
-- Update `README.md` examples and restore notes.
+- Support `mux pick` and `mux p` with no selector as an interactive picker that shows the list and waits for user input in interactive terminals.
+- Reuse the same selector resolution rules as `mux pick <selector>`.
+- Avoid hanging in non-interactive contexts such as pipes or scripts.
+- Update tests for interactive and non-interactive behavior.
+- Update `README.md` examples and usage text.
 
 ## Research Notes
 
