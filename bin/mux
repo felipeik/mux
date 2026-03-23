@@ -85,7 +85,7 @@ command_string_for_title() {
 }
 
 raw_cmux_mux_entries() {
-  cmux tree --all --json | jq -c '
+  jq -c '
     [
       .windows[]?.workspaces[]? as $workspace |
       $workspace.panes[]? as $pane |
@@ -96,6 +96,7 @@ raw_cmux_mux_entries() {
         and (.title | startswith("mux tab ") | not)
       ) |
       {
+        ref: .ref,
         workspace_title: $workspace.title,
         pane_index: $pane.index,
         surface_index_in_pane: .index_in_pane,
@@ -108,11 +109,29 @@ raw_cmux_mux_entries() {
   '
 }
 
-filter_entries_to_live_tmux_sessions() {
-  local entries="$1"
-  local live_sessions entry session
+cmux_caller_surface_ref() {
+  jq -r '.caller.surface_ref // empty'
+}
 
-  if ! command -v tmux >/dev/null 2>&1; then
+is_internal_mux_command_name() {
+  local command_name="${1%% *}"
+
+  case "$command_name" in
+    help|h|-h|--help|list|l|save|s|restore|r|cleanup|join|j)
+      return 0
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
+filter_transient_current_surface_entry() {
+  local entries="$1"
+  local current_surface_ref="$2"
+  local live_sessions entry session ref
+
+  if [ -z "$current_surface_ref" ]; then
     if [ -n "$entries" ]; then
       printf '%s\n' "$entries"
     fi
@@ -123,8 +142,15 @@ filter_entries_to_live_tmux_sessions() {
 
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
+    ref="$(printf '%s\n' "$entry" | jq -r '.ref')"
     session="$(printf '%s\n' "$entry" | jq -r '.session')"
-    if list_contains_line "$session" "$live_sessions"; then
+
+    if [ "$ref" != "$current_surface_ref" ] || ! is_internal_mux_command_name "$session"; then
+      printf '%s\n' "$entry"
+      continue
+    fi
+
+    if [ -n "$live_sessions" ] && list_contains_line "$session" "$live_sessions"; then
       printf '%s\n' "$entry"
     fi
   done <<EOF
@@ -205,13 +231,15 @@ EOF
 }
 
 live_mux_entries() {
-  local entries state_file
+  local entries state_file tree_json current_surface_ref
 
   ensure_command jq
 
   if command -v cmux >/dev/null 2>&1; then
-    entries="$(raw_cmux_mux_entries)"
-    filter_entries_to_live_tmux_sessions "$entries"
+    tree_json="$(cmux tree --all --json)"
+    entries="$(printf '%s\n' "$tree_json" | raw_cmux_mux_entries)"
+    current_surface_ref="$(printf '%s\n' "$tree_json" | cmux_caller_surface_ref)"
+    filter_transient_current_surface_entry "$entries" "$current_surface_ref"
     return
   fi
 

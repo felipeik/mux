@@ -501,6 +501,9 @@ test_mux_list_ignores_transient_command_titles_that_are_not_tmux_sessions() {
 
   cat >"$temp_dir/tree.json" <<'EOF'
 {
+  "caller": {
+    "surface_ref": "surface:transient"
+  },
   "windows": [
     {
       "workspaces": [
@@ -513,11 +516,13 @@ test_mux_list_ignores_transient_command_titles_that_are_not_tmux_sessions() {
                 {
                   "type": "terminal",
                   "title": "mux backend",
+                  "ref": "surface:backend",
                   "index_in_pane": 0
                 },
                 {
                   "type": "terminal",
-                  "title": "mux list",
+                  "title": "mux list 456",
+                  "ref": "surface:transient",
                   "index_in_pane": 1
                 }
               ]
@@ -553,7 +558,7 @@ EOF
   output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
   assert_contains "1  a    Alpha      backend" "$output" "expected the real mux session to stay listed"
   case "$output" in
-    *"Alpha      list"*|*"2  b"*)
+    *"Alpha      list 456"*|*"2  b"*)
       fail "expected transient command-title surfaces like mux list to be excluded from mux list"
       ;;
   esac
