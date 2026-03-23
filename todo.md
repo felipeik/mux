@@ -108,24 +108,6 @@
 - Update tests for the standardized title behavior.
 - Update `README.md` examples and restore notes.
 
-### Task 8: Remove the Redundant `Title` Column from `mux list`
-
-**Standalone:** yes
-**Depends on:** none
-
-**Files:**
-- Update: `bin/mux`
-- Update: `README.md`
-- Update: `tests/run-tests.sh`
-
-**Goal:** simplify `mux list` output by hiding the tab title column.
-
-**Requirements:**
-- Remove the `Title` column from list output.
-- Keep the numeric selector, letter selector, workspace, and session columns.
-- Update list-format tests.
-- Update `README.md` examples if needed.
-
 ### Task 9: Add Non-Interactive `mux pick <selector>` and `mux p <selector>`
 
 **Standalone:** yes

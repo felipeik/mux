@@ -7,7 +7,7 @@ Standalone Bash CLI for restoring tmux-backed terminals inside cmux.
 - `mux` is an alias for `mux list`.
 - `mux <name>` attaches or creates a tmux session with `tmux new-session -A -s <name>`.
 - `mux tab <name>` does the same, but keeps the visible tab title in the legacy `mux tab <name>` format.
-- `mux list` shows the current mux-backed tabs in a table with numeric and letter selectors.
+- `mux list` shows the current mux-backed tabs in a table with numeric and letter selectors, workspace names, and tmux session names.
 - `mux <selector>` such as `mux 1` or `mux a` joins the matching listed mux tab when a selector match exists.
 - `mux -h`, `mux --help`, and `mux help` print usage.
 - `mux save` and `mux s` rewrite the saved snapshot for all current cmux workspaces.
@@ -18,7 +18,6 @@ Standalone Bash CLI for restoring tmux-backed terminals inside cmux.
 - Selector matching has priority for bare numeric and letter tokens. If `1` or `a` matches a listed mux tab, `mux 1` or `mux a` joins that tab's tmux session.
 - If no listed mux tab matches, the same token falls back to a literal tmux session name. This means `mux 999` or `mux z` can still create or attach to tmux sessions with those names.
 - `mux tab <name>` always treats the argument as a literal session name, so `mux tab 1` is valid.
-- `mux list` marks conflicting selectors with `(*)` when the selector text also matches an existing tmux session name.
 
 ## Restore Rules
 

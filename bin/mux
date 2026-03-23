@@ -212,64 +212,28 @@ live_mux_entries() {
   ' "$state_file"
 }
 
-tmux_session_names() {
-  if ! command -v tmux >/dev/null 2>&1; then
-    return 0
-  fi
-
-  tmux list-sessions -F '#{session_name}' 2>/dev/null || true
-}
-
-selector_display() {
-  local selector="$1"
-  local session_names="$2"
-  local session_name
-
-  while IFS= read -r session_name; do
-    [ -n "$session_name" ] || continue
-    if [ "$session_name" = "$selector" ]; then
-      printf '%s(*)\n' "$selector"
-      return 0
-    fi
-  done <<EOF
-$session_names
-EOF
-
-  printf '%s\n' "$selector"
-}
-
 cmd_list() {
   local entries index=0
-  local entry workspace title session key
-  local session_names index_display key_display
-  local width_index width_key width_workspace width_title width_session
-  local dashes_index dashes_key dashes_workspace dashes_title dashes_session
-  local has_conflicts=0
+  local entry workspace session key
+  local width_index width_key width_workspace width_session
+  local dashes_index dashes_key dashes_workspace dashes_session
 
   entries="$(live_mux_entries)"
-  session_names="$(tmux_session_names)"
 
   width_index=1
   width_key=3
   width_workspace=9
-  width_title=5
   width_session=7
 
   while IFS= read -r entry; do
     [ -n "$entry" ] || continue
     index=$((index + 1))
     key="$(selection_label "$index")"
-    index_display="$(selector_display "$index" "$session_names")"
-    key_display="$(selector_display "$key" "$session_names")"
-    [ "$index_display" != "$index" ] && has_conflicts=1
-    [ "$key_display" != "$key" ] && has_conflicts=1
     workspace="$(printf '%s\n' "$entry" | jq -r '.workspace_title')"
-    title="$(printf '%s\n' "$entry" | jq -r '.title')"
     session="$(printf '%s\n' "$entry" | jq -r '.session')"
-    [ "${#index_display}" -gt "$width_index" ] && width_index="${#index_display}"
-    [ "${#key_display}" -gt "$width_key" ] && width_key="${#key_display}"
+    [ "${#index}" -gt "$width_index" ] && width_index="${#index}"
+    [ "${#key}" -gt "$width_key" ] && width_key="${#key}"
     [ "${#workspace}" -gt "$width_workspace" ] && width_workspace="${#workspace}"
-    [ "${#title}" -gt "$width_title" ] && width_title="${#title}"
     [ "${#session}" -gt "$width_session" ] && width_session="${#session}"
   done <<EOF
 $entries
@@ -278,21 +242,17 @@ EOF
   dashes_index="$(printf '%*s' "$width_index" '' | tr ' ' '-')"
   dashes_key="$(printf '%*s' "$width_key" '' | tr ' ' '-')"
   dashes_workspace="$(printf '%*s' "$width_workspace" '' | tr ' ' '-')"
-  dashes_title="$(printf '%*s' "$width_title" '' | tr ' ' '-')"
   dashes_session="$(printf '%*s' "$width_session" '' | tr ' ' '-')"
 
-  printf 'Join a session with: mux 1 or mux a\n'
-  printf '%-*s  %-*s  %-*s  %-*s  %-*s\n' \
+  printf '%-*s  %-*s  %-*s  %-*s\n' \
     "$width_index" "#" \
     "$width_key" "Key" \
     "$width_workspace" "Workspace" \
-    "$width_title" "Title" \
     "$width_session" "Session"
-  printf '%-*s  %-*s  %-*s  %-*s  %-*s\n' \
+  printf '%-*s  %-*s  %-*s  %-*s\n' \
     "$width_index" "$dashes_index" \
     "$width_key" "$dashes_key" \
     "$width_workspace" "$dashes_workspace" \
-    "$width_title" "$dashes_title" \
     "$width_session" "$dashes_session"
 
   index=0
@@ -300,25 +260,16 @@ EOF
     [ -n "$entry" ] || continue
     index=$((index + 1))
     key="$(selection_label "$index")"
-    index_display="$(selector_display "$index" "$session_names")"
-    key_display="$(selector_display "$key" "$session_names")"
     workspace="$(printf '%s\n' "$entry" | jq -r '.workspace_title')"
-    title="$(printf '%s\n' "$entry" | jq -r '.title')"
     session="$(printf '%s\n' "$entry" | jq -r '.session')"
-    printf '%-*s  %-*s  %-*s  %-*s  %-*s\n' \
-      "$width_index" "$index_display" \
-      "$width_key" "$key_display" \
+    printf '%-*s  %-*s  %-*s  %-*s\n' \
+      "$width_index" "$index" \
+      "$width_key" "$key" \
       "$width_workspace" "$workspace" \
-      "$width_title" "$title" \
       "$width_session" "$session"
   done <<EOF
 $entries
 EOF
-
-  if [ "$has_conflicts" -eq 1 ]; then
-    printf '(*) selector conflicts with an existing tmux session name\n'
-  fi
-  printf 'Tip: use mux 1 or mux a to join a listed session\n'
 }
 
 cmd_tab() {

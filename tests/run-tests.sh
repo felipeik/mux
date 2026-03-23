@@ -74,7 +74,7 @@ EOF
   list_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
 
   assert_eq "$list_output" "$bare_output" "expected bare mux to match mux list output"
-  assert_contains "Join a session with: mux 1 or mux a" "$bare_output" "expected bare mux to show list helper text"
+  assert_contains "Workspace" "$bare_output" "expected bare mux to show the list table"
 }
 
 test_tab_uses_tmux_new_session_and_renames_cmux_tab() {
@@ -351,12 +351,14 @@ exit 0
 EOF
 
   output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
-  assert_contains "Join a session with: mux 1 or mux a" "$output" "expected top list helper"
-  assert_contains "Workspace  Title        Session" "$output" "expected list header row"
-  assert_contains "1(*)  a     Alpha      mux backend  backend" "$output" "expected integer conflict marker on first row"
-  assert_contains "2     b(*)  Beta       mux api-1    api-1" "$output" "expected letter conflict marker on second row"
-  assert_contains "(*) selector conflicts with an existing tmux session name" "$output" "expected conflict hint"
-  assert_contains "Tip: use mux 1 or mux a to join a listed session" "$output" "expected bottom list helper"
+  assert_contains "Workspace  Session" "$output" "expected list header row"
+  assert_contains "1  a    Alpha      backend" "$output" "expected first row without title or conflict marker"
+  assert_contains "2  b    Beta       api-1" "$output" "expected second row without title or conflict marker"
+  case "$output" in
+    *"Title"*|*"Join a session with"*|*"Tip: use mux"*|*"(*)"*)
+      fail "expected mux list to omit deprecated title, conflict, and helper text"
+      ;;
+  esac
   case "$output" in
     *lazygit*)
       fail "expected mux list to exclude non-mux terminals"
@@ -434,8 +436,8 @@ EOF
 
   output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
   case "$output" in
-    *"(*) selector conflicts with an existing tmux session name"*|*"(*)"*)
-      fail "expected mux list to omit conflict markers when selectors do not collide"
+    *"Title"*|*"Join a session with"*|*"Tip: use mux"*|*"(*)"*)
+      fail "expected mux list to omit deprecated title, conflict, and helper text"
       ;;
   esac
 }
@@ -794,12 +796,14 @@ exec "$jq_bin" "\$@"
 EOF
 
   output="$(PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
-  assert_contains "Join a session with: mux 1 or mux a" "$output" "expected saved-state top helper without cmux"
-  assert_contains "Workspace  Title        Session" "$output" "expected saved-state list header without cmux"
-  assert_contains "1(*)  a     Alpha      mux backend  backend" "$output" "expected saved-state list output without cmux"
-  assert_contains "2     b(*)  Beta       mux api-1    api-1" "$output" "expected saved-state ordering without cmux"
-  assert_contains "(*) selector conflicts with an existing tmux session name" "$output" "expected saved-state conflict hint without cmux"
-  assert_contains "Tip: use mux 1 or mux a to join a listed session" "$output" "expected saved-state bottom helper without cmux"
+  assert_contains "Workspace  Session" "$output" "expected saved-state list header without cmux"
+  assert_contains "1  a    Alpha      backend" "$output" "expected saved-state first row without title or conflict marker"
+  assert_contains "2  b    Beta       api-1" "$output" "expected saved-state ordering without cmux"
+  case "$output" in
+    *"Title"*|*"Join a session with"*|*"Tip: use mux"*|*"(*)"*)
+      fail "expected saved-state list to omit deprecated title, conflict, and helper text"
+      ;;
+  esac
 
   PATH="$stub_dir:/usr/bin:/bin" \
   MUX_STATE_FILE="$state_file" \
