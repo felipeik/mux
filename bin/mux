@@ -48,6 +48,14 @@ shell_quote() {
   printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
 }
 
+sanitize_for_display() {
+  LC_ALL=C printf '%s' "$1" | tr '\000-\037\177' '?'
+}
+
+is_safe_session_name() {
+  [ "$(sanitize_for_display "$1")" = "$1" ]
+}
+
 rename_cmux_tab() {
   local title="$1"
   if [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ -n "${CMUX_SURFACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
@@ -182,7 +190,7 @@ join_session() {
   local title="$2"
 
   if ! tmux has-session -t "$name" >/dev/null 2>&1; then
-    echo "missing tmux session: $name" >&2
+    printf 'missing tmux session: %s\n' "$(sanitize_for_display "$name")" >&2
     exit 1
   fi
 
@@ -380,8 +388,8 @@ cmd_list() {
     [ -n "$entry" ] || continue
     index=$((index + 1))
     key="$(selection_label "$index")"
-    workspace="$(printf '%s\n' "$entry" | jq -r '.workspace_title')"
-    session="$(printf '%s\n' "$entry" | jq -r '.session')"
+    workspace="$(sanitize_for_display "$(printf '%s\n' "$entry" | jq -r '.workspace_title')")"
+    session="$(sanitize_for_display "$(printf '%s\n' "$entry" | jq -r '.session')")"
     [ "${#index}" -gt "$width_index" ] && width_index="${#index}"
     [ "${#key}" -gt "$width_key" ] && width_key="${#key}"
     [ "${#workspace}" -gt "$width_workspace" ] && width_workspace="${#workspace}"
@@ -411,8 +419,8 @@ EOF
     [ -n "$entry" ] || continue
     index=$((index + 1))
     key="$(selection_label "$index")"
-    workspace="$(printf '%s\n' "$entry" | jq -r '.workspace_title')"
-    session="$(printf '%s\n' "$entry" | jq -r '.session')"
+    workspace="$(sanitize_for_display "$(printf '%s\n' "$entry" | jq -r '.workspace_title')")"
+    session="$(sanitize_for_display "$(printf '%s\n' "$entry" | jq -r '.session')")"
     printf '%-*s  %-*s  %-*s  %-*s\n' \
       "$width_index" "$index" \
       "$width_key" "$key" \
@@ -429,6 +437,11 @@ cmd_launch() {
 
   if [ -z "$name" ]; then
     echo "mux $command_name requires a session name" >&2
+    exit 1
+  fi
+
+  if ! is_safe_session_name "$name"; then
+    printf 'invalid session name: %s\n' "$(sanitize_for_display "$name")" >&2
     exit 1
   fi
 
@@ -449,7 +462,7 @@ cmd_join_selector() {
   fi
 
   if ! entry="$(find_entry_by_selector "$selector")"; then
-    echo "unknown mux selector: $selector" >&2
+    printf 'unknown mux selector: %s\n' "$(sanitize_for_display "$selector")" >&2
     exit 1
   fi
 
@@ -523,7 +536,7 @@ cmd_save() {
   ' >"$temp_file"
 
   mv "$temp_file" "$state_file"
-  printf 'saved %s\n' "$state_file"
+  printf 'saved %s\n' "$(sanitize_for_display "$state_file")"
 }
 
 cmd_restore() {
@@ -551,7 +564,7 @@ cmd_restore() {
     ')"
 
     if [ -z "$workspace_ref" ]; then
-      printf 'skipping workspace %s\n' "$workspace_title"
+      printf 'skipping workspace %s\n' "$(sanitize_for_display "$workspace_title")"
       continue
     fi
 
@@ -578,15 +591,21 @@ cmd_restore() {
         ')"
 
       if [ -z "$surface_ref" ]; then
-        printf 'skipping tab %s in workspace %s\n' "$session" "$workspace_title"
+        printf 'skipping tab %s in workspace %s\n' \
+          "$(sanitize_for_display "$session")" \
+          "$(sanitize_for_display "$workspace_title")"
         continue
       fi
 
       command_string="$(command_string_for_title "$self_path" "$title")"
       if cmux respawn-pane --workspace "$workspace_ref" --surface "$surface_ref" --command "$command_string" >/dev/null 2>&1; then
-        printf 'restored %s: %s\n' "$workspace_title" "$session"
+        printf 'restored %s: %s\n' \
+          "$(sanitize_for_display "$workspace_title")" \
+          "$(sanitize_for_display "$session")"
       else
-        printf 'skipping restore for %s: %s\n' "$workspace_title" "$session"
+        printf 'skipping restore for %s: %s\n' \
+          "$(sanitize_for_display "$workspace_title")" \
+          "$(sanitize_for_display "$session")"
       fi
     done <<EOF
 $(printf '%s\n' "$workspace_json" | jq -c '
@@ -641,7 +660,7 @@ cmd_cleanup() {
   printf 'Orphan tmux sessions:\n'
   while IFS= read -r session; do
     [ -n "$session" ] || continue
-    printf '%s\n' "$session"
+    printf '%s\n' "$(sanitize_for_display "$session")"
   done <<EOF
 $orphan_sessions
 EOF

@@ -144,6 +144,8 @@ If you SSH into the same machine from your phone or iPad, `mux list` plus `mux j
 - Non-tmux commands such as `lazygit` are ignored by save/restore.
 - `mux join` only accepts selectors from the current list. It does not fall back to treating the argument as a literal tmux session name.
 - Bare commands like `mux 1` or `mux backend` are invalid on purpose. Use `mux join <selector>` or `mux tab <name>`.
+- `mux tab <name>` rejects session names that contain terminal control characters.
+- Names printed by `mux` are sanitized before they are written to the terminal.
 - `mux restore` uses `cmux respawn-pane`, so it is aimed at `cmux` layouts that still exist but lost the terminal process behind them.
 - `mux` does not replace `cmux`'s own layout handling. It only remembers which tmux session belonged to which saved mux-managed terminal.
 - `mux cleanup` can kill tmux sessions. Read the list before approving it.

@@ -178,6 +178,39 @@ EOF
   assert_contains "tmux:new-session -A -s claude-123" "$(cat "$log_file")" "expected tmux new-session -A -s for t"
 }
 
+test_mux_tab_rejects_control_characters_in_session_name() {
+  local temp_dir stub_dir output log_file name esc
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  name="$(printf 'bad\033[31mred')"
+  esc="$(printf '\033')"
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" tab "$name" 2>&1 || true)"
+
+  assert_contains "invalid session name: bad?[31mred" "$output" "expected mux tab to reject control characters with sanitized output"
+  case "$output" in
+    *"$esc"*)
+      fail "expected mux tab rejection output to avoid raw escape bytes"
+      ;;
+  esac
+  if [ -f "$log_file" ]; then
+    fail "expected mux tab to reject invalid session name before calling tmux or cmux"
+  fi
+}
+
 test_bare_name_requires_explicit_launch_command() {
   local temp_dir stub_dir output
   temp_dir="$(make_temp_dir)"
@@ -413,6 +446,47 @@ EOF
   case "$output" in
     *lazygit*)
       fail "expected mux list to exclude non-mux terminals"
+      ;;
+  esac
+}
+
+test_mux_list_sanitizes_control_characters_in_session_names() {
+  local temp_dir stub_dir output esc
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  esc="$(printf '\033')"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{"windows":[]}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "list-sessions" ] && [ "$2" = "-F" ]; then
+  printf 'plain\n'
+  printf 'evil\033[31mred\033[0m\n'
+  exit 0
+fi
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
+
+  assert_contains "plain" "$output" "expected mux list to keep normal unmanaged session names"
+  assert_contains "evil?[31mred?[0m" "$output" "expected mux list to replace control characters in session names"
+  case "$output" in
+    *"$esc"*)
+      fail "expected mux list output to avoid raw escape bytes"
       ;;
   esac
 }
@@ -1992,11 +2066,13 @@ main() {
   test_mux_r_alias_matches_mux_restore
   test_tab_uses_tmux_new_session_and_renames_cmux_tab
   test_t_uses_tmux_new_session_and_renames_cmux_tab
+  test_mux_tab_rejects_control_characters_in_session_name
   test_bare_name_requires_explicit_launch_command
   test_mux_t_launch_persists_before_entering_tmux
   test_mux_tab_launch_persists_before_entering_tmux
   test_launch_commands_treat_literal_names_as_session_names
   test_mux_list_prints_numbered_mux_tabs_only
+  test_mux_list_sanitizes_control_characters_in_session_names
   test_mux_list_hides_conflict_marker_when_no_selector_conflicts_exist
   test_mux_list_ignores_transient_command_titles_that_are_not_tmux_sessions
   test_mux_list_appends_unmanaged_tmux_sessions_after_mux_entries
