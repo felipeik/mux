@@ -52,6 +52,26 @@ rename_cmux_tab() {
   fi
 }
 
+is_exact_integer() {
+  case "$1" in
+    ""|*[!0-9]*)
+      return 1
+      ;;
+    *)
+      return 0
+      ;;
+  esac
+}
+
+validate_session_name() {
+  local name="$1"
+
+  if is_exact_integer "$name"; then
+    echo "exact integer session names are reserved for mux list indexes" >&2
+    exit 1
+  fi
+}
+
 title_session() {
   local title="$1"
   case "$title" in
@@ -81,6 +101,27 @@ command_string_for_title() {
   esac
 }
 
+best_effort_persist_on_launch() {
+  if ! command -v cmux >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
+    echo "warning: skipping mux persist during launch because cmux or jq is unavailable" >&2
+    return 0
+  fi
+
+  if ! cmd_persist >/dev/null; then
+    echo "warning: mux persist failed during launch" >&2
+  fi
+}
+
+open_session() {
+  local name="$1"
+  local title="$2"
+
+  validate_session_name "$name"
+  rename_cmux_tab "$title"
+  best_effort_persist_on_launch
+  exec tmux new-session -A -s "$name"
+}
+
 cmd_tab() {
   local name="${1:-}"
   if [ -z "$name" ]; then
@@ -88,8 +129,7 @@ cmd_tab() {
     exit 1
   fi
 
-  rename_cmux_tab "mux tab $name"
-  exec tmux new-session -A -s "$name"
+  open_session "$name" "mux tab $name"
 }
 
 cmd_name() {
@@ -99,8 +139,7 @@ cmd_name() {
     exit 1
   fi
 
-  rename_cmux_tab "mux $name"
-  exec tmux new-session -A -s "$name"
+  open_session "$name" "mux $name"
 }
 
 cmd_persist() {
