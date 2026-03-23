@@ -20,6 +20,38 @@
 **Deliverable:**
 - Write a short spike doc at `docs/plans/2026-03-23-mux-auto-persist-hooks-spike.md` with the recommendation, caveats, and the next implementation step.
 
+### Task 2: Add `mux close` for Listed Tabs and Named Sessions
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+
+**Goal:** support `mux close 1`, `mux close a`, and `mux close <name>` so the command kills the targeted tmux session without closing the corresponding cmux tab.
+
+**Requirements:**
+- Accept the same numeric, letter, and literal-name selectors that `mux attach` and related commands already understand.
+- Resolve the selector to the mux-managed tab/session entry before destroying anything.
+- Kill the tmux session for the resolved target.
+- Do not close the matching cmux tab as part of the command flow.
+- Document the command behavior and examples in `README.md`.
+
+### Task 3: Add `mux cleanup` for Non-Snapshotted tmux Sessions
+
+**Files:**
+- Update: `bin/mux`
+- Update: `README.md`
+
+**Goal:** support `mux cleanup` as a bulk cleanup command that finds tmux sessions not represented in the current mux snapshot, shows the sessions that would be removed, asks for an explicit `yes` confirmation, and then kills all listed tmux sessions.
+
+**Requirements:**
+- Read the current mux snapshot and derive the set of tmux session names tracked by mux-managed tabs.
+- List tmux sessions that exist in tmux but are not present in the mux snapshot.
+- Show the unmatched session names before any destructive action happens.
+- Require an explicit `yes` confirmation before proceeding with deletion.
+- Kill every listed unmatched tmux session after confirmation.
+- Abort without changes for any answer other than `yes`.
+- Document the command behavior, confirmation requirement, and examples in `README.md`.
+
 ## Research Notes
 
 - tmux documents server, session, and window hooks such as `window-renamed`, plus control-mode notifications including `%window-add`, `%window-close`, and `%window-renamed`: https://man7.org/linux/man-pages/man1/tmux.1.html
