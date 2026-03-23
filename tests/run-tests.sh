@@ -588,6 +588,337 @@ EOF
   assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected mux b to attach to the second listed session"
 }
 
+test_mux_join_numeric_selector_attaches_by_list_index() {
+  local temp_dir stub_dir log_file
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Beta",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux api-1",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  PATH="$stub_dir:$PATH" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" join 1 || true
+
+  assert_file_exists "$log_file"
+  assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected mux join 1 to attach to the first listed session"
+}
+
+test_mux_join_alias_letter_selector_attaches_by_list_key() {
+  local temp_dir stub_dir log_file
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Beta",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux api-1",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  PATH="$stub_dir:$PATH" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" j b || true
+
+  assert_file_exists "$log_file"
+  assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected mux j b to attach to the second listed session"
+}
+
+test_mux_join_unknown_selector_does_not_fall_back_to_literal_session() {
+  local temp_dir stub_dir log_file output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{"windows":[]}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" join 999 2>&1 || true)"
+
+  assert_contains "unknown mux selector: 999" "$output" "expected mux join 999 to reject unknown selectors"
+  if [ -f "$log_file" ]; then
+    case "$(cat "$log_file")" in
+      *"tmux:new-session -A -s 999"*)
+        fail "expected mux join 999 to avoid literal session fallback"
+        ;;
+    esac
+  fi
+}
+
+test_mux_join_without_selector_reads_prompt_in_interactive_mode() {
+  local temp_dir stub_dir log_file output run_script expect_script
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  output="$temp_dir/output.txt"
+  run_script="$temp_dir/run-join.sh"
+  expect_script="$temp_dir/run-join.expect"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Beta",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux api-1",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  write_executable "$run_script" <<EOF
+#!/usr/bin/env bash
+PATH="$stub_dir:\$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" join
+EOF
+
+  cat >"$expect_script" <<EOF
+log_file -noappend "$output"
+spawn "$run_script"
+expect "selector: "
+send "b\r"
+expect eof
+EOF
+
+  expect "$expect_script" >/dev/null 2>&1 || true
+
+  assert_file_exists "$log_file"
+  assert_contains "Workspace" "$(cat "$output")" "expected mux join to print the list before prompting"
+  assert_contains "selector:" "$(cat "$output")" "expected mux join to prompt for a selector in interactive mode"
+  assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected mux join to attach after reading the prompt selection"
+}
+
+test_mux_join_without_selector_prints_list_and_errors_in_non_interactive_mode() {
+  local temp_dir stub_dir log_file output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  output="$temp_dir/output.txt"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  PATH="$stub_dir:$PATH" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" join >"$output" 2>&1 || true
+
+  assert_contains "Workspace" "$(cat "$output")" "expected mux join to print the list in non-interactive mode"
+  assert_contains "selector required in non-interactive mode" "$(cat "$output")" "expected mux join to fail instead of hanging without a tty"
+  if [ -f "$log_file" ]; then
+    case "$(cat "$log_file")" in
+      *"tmux:new-session -A -s"*)
+        fail "expected mux join with no selector in non-interactive mode to avoid tmux launch"
+        ;;
+    esac
+  fi
+}
+
 test_mux_numeric_selection_does_not_launch_tmux_from_list_stdin() {
   local temp_dir stub_dir log_file
   temp_dir="$(make_temp_dir)"
@@ -1382,6 +1713,8 @@ test_readme_documents_supported_commands() {
   readme="$(cat "$ROOT_DIR/README.md")"
   assert_contains "mux <name>" "$readme" "expected bare alias usage in README"
   assert_contains "mux tab <name>" "$readme" "expected tab usage in README"
+  assert_contains "mux join <selector>" "$readme" "expected join usage in README"
+  assert_contains "mux j <selector>" "$readme" "expected join alias usage in README"
   assert_contains "mux save" "$readme" "expected save usage in README"
   assert_contains "mux s" "$readme" "expected short save usage in README"
   assert_contains "mux cleanup" "$readme" "expected cleanup usage in README"
@@ -1402,6 +1735,11 @@ main() {
   test_mux_list_hides_conflict_marker_when_no_selector_conflicts_exist
   test_mux_numeric_selection_attaches_by_list_index
   test_mux_letter_selection_attaches_by_list_key
+  test_mux_join_numeric_selector_attaches_by_list_index
+  test_mux_join_alias_letter_selector_attaches_by_list_key
+  test_mux_join_unknown_selector_does_not_fall_back_to_literal_session
+  test_mux_join_without_selector_reads_prompt_in_interactive_mode
+  test_mux_join_without_selector_prints_list_and_errors_in_non_interactive_mode
   test_mux_numeric_selection_does_not_launch_tmux_from_list_stdin
   test_mux_numeric_selection_rejects_unknown_index
   test_mux_unmatched_numeric_and_letter_fall_back_to_session_names

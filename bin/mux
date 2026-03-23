@@ -11,6 +11,8 @@ usage: mux
 Commands:
   <name>
   <index>
+  join [<selector>]
+  j [<selector>]
   tab <name>
   list
   save
@@ -120,6 +122,20 @@ best_effort_save_on_launch() {
 open_session() {
   local name="$1"
   local title="$2"
+
+  rename_cmux_tab "$title"
+  best_effort_save_on_launch
+  exec tmux new-session -A -s "$name"
+}
+
+join_session() {
+  local name="$1"
+  local title="$2"
+
+  if ! tmux has-session -t "$name" >/dev/null 2>&1; then
+    echo "missing tmux session: $name" >&2
+    exit 1
+  fi
 
   rename_cmux_tab "$title"
   best_effort_save_on_launch
@@ -352,6 +368,56 @@ cmd_name() {
   open_session "$name" "mux $name"
 }
 
+is_interactive_terminal() {
+  [ -t 0 ] && [ -t 1 ]
+}
+
+cmd_join_selector() {
+  local selector="${1:-}"
+  local entry session title
+
+  if [ -z "$selector" ]; then
+    echo "mux join requires a selector" >&2
+    exit 1
+  fi
+
+  if ! entry="$(find_entry_by_selector "$selector")"; then
+    echo "unknown mux selector: $selector" >&2
+    exit 1
+  fi
+
+  session="$(printf '%s\n' "$entry" | jq -r '.session')"
+  title="$(printf '%s\n' "$entry" | jq -r '.title')"
+  join_session "$session" "$title"
+}
+
+cmd_join() {
+  local selector="${1:-}"
+
+  if [ "$#" -gt 1 ]; then
+    echo "mux join accepts at most one selector" >&2
+    exit 1
+  fi
+
+  if [ -n "$selector" ]; then
+    cmd_join_selector "$selector"
+  fi
+
+  cmd_list
+
+  if ! is_interactive_terminal; then
+    echo "selector required in non-interactive mode" >&2
+    exit 1
+  fi
+
+  printf 'selector: '
+  if ! IFS= read -r selector; then
+    selector=""
+  fi
+
+  cmd_join_selector "$selector"
+}
+
 cmd_save() {
   local state_file temp_file
 
@@ -526,6 +592,10 @@ main() {
     tab)
       shift
       cmd_tab "$@"
+      ;;
+    join|j)
+      shift
+      cmd_join "$@"
       ;;
     list)
       shift
