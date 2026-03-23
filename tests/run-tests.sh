@@ -166,7 +166,7 @@ EOF
   assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected tmux new-session for legacy launch"
 }
 
-test_exact_integer_tab_names_are_rejected() {
+test_exact_integer_tab_names_still_launch() {
   local temp_dir stub_dir log_file output
   temp_dir="$(make_temp_dir)"
   stub_dir="$temp_dir/bin"
@@ -183,15 +183,15 @@ EOF
 printf 'cmux:%s\n' "\$*" >>"$log_file"
 EOF
 
-  output="$(PATH="$stub_dir:$PATH" "$ROOT_DIR/bin/mux" tab 1 2>&1 || true)"
-  assert_contains "integer" "$output" "expected integer-name validation for mux tab"
-  if [ -f "$log_file" ]; then
-    case "$(cat "$log_file")" in
-      *"tmux:new-session -A -s 1"*|*"cmux:rename-tab"*)
-        fail "expected mux tab 1 to stop before cmux or tmux commands"
-        ;;
-    esac
-  fi
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" tab 1 2>&1 || true)"
+  case "$output" in
+    *"integer"*)
+      fail "expected mux tab 1 to be treated as a valid session name"
+      ;;
+  esac
+  assert_file_exists "$log_file"
+  assert_contains "cmux:rename-tab" "$(cat "$log_file")" "expected mux tab 1 to rename the tab"
+  assert_contains "tmux:new-session -A -s 1" "$(cat "$log_file")" "expected mux tab 1 to launch session 1"
 }
 
 test_non_integer_names_still_launch() {
@@ -285,16 +285,102 @@ EOF
 
   write_executable "$stub_dir/tmux" <<EOF
 #!/usr/bin/env bash
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+1
+b
+OUT
+  exit 0
+fi
 exit 0
 EOF
 
   output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
-  assert_contains "#  Workspace  Title        Session" "$output" "expected list header row"
-  assert_contains "1  Alpha      mux backend  backend" "$output" "expected first numbered mux tab in stable order"
-  assert_contains "2  Beta       mux api-1    api-1" "$output" "expected second numbered mux tab in stable order"
+  assert_contains "Join a session with: mux 1 or mux a" "$output" "expected top list helper"
+  assert_contains "Workspace  Title        Session" "$output" "expected list header row"
+  assert_contains "1(*)  a     Alpha      mux backend  backend" "$output" "expected integer conflict marker on first row"
+  assert_contains "2     b(*)  Beta       mux api-1    api-1" "$output" "expected letter conflict marker on second row"
+  assert_contains "(*) selector conflicts with an existing tmux session name" "$output" "expected conflict hint"
+  assert_contains "Tip: use mux 1 or mux a to join a listed session" "$output" "expected bottom list helper"
   case "$output" in
     *lazygit*)
       fail "expected mux list to exclude non-mux terminals"
+      ;;
+  esac
+}
+
+test_mux_list_hides_conflict_marker_when_no_selector_conflicts_exist() {
+  local temp_dir stub_dir output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Beta",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux api-1",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+api-1
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
+  case "$output" in
+    *"(*) selector conflicts with an existing tmux session name"*|*"(*)"*)
+      fail "expected mux list to omit conflict markers when selectors do not collide"
       ;;
   esac
 }
@@ -370,6 +456,79 @@ EOF
 
   assert_file_exists "$log_file"
   assert_contains "tmux:new-session -A -s backend" "$(cat "$log_file")" "expected mux 1 to attach to the first listed session"
+}
+
+test_mux_letter_selection_attaches_by_list_key() {
+  local temp_dir stub_dir log_file
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Beta",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux api-1",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  PATH="$stub_dir:$PATH" \
+  CMUX_WORKSPACE_ID="workspace:1" \
+  CMUX_SURFACE_ID="surface:9" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" b || true
+
+  assert_file_exists "$log_file"
+  assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected mux b to attach to the second listed session"
 }
 
 test_mux_numeric_selection_does_not_launch_tmux_from_list_stdin() {
@@ -477,7 +636,50 @@ exit 1
 EOF
 
   output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" 999 2>&1 || true)"
-  assert_contains "index" "$output" "expected clear invalid-index error"
+  case "$output" in
+    *"unknown mux list index"*)
+      fail "expected mux 999 to fall back to a literal session name when no list match exists"
+      ;;
+  esac
+}
+
+test_mux_unmatched_numeric_and_letter_fall_back_to_session_names() {
+  local temp_dir stub_dir log_file
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{"windows":[]}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  PATH="$stub_dir:$PATH" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" 999 || true
+
+  PATH="$stub_dir:$PATH" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" z || true
+
+  assert_file_exists "$log_file"
+  assert_contains "tmux:new-session -A -s 999" "$(cat "$log_file")" "expected unmatched numeric token to remain a literal session name"
+  assert_contains "tmux:new-session -A -s z" "$(cat "$log_file")" "expected unmatched letter token to remain a literal session name"
 }
 
 test_mux_list_and_index_work_without_cmux_using_saved_state() {
@@ -521,6 +723,13 @@ EOF
 
   write_executable "$stub_dir/tmux" <<EOF
 #!/usr/bin/env bash
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+1
+b
+OUT
+  exit 0
+fi
 printf 'tmux:%s\n' "\$*" >>"$log_file"
 EOF
 
@@ -530,9 +739,12 @@ exec "$jq_bin" "\$@"
 EOF
 
   output="$(PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
-  assert_contains "#  Workspace  Title        Session" "$output" "expected saved-state list header without cmux"
-  assert_contains "1  Alpha      mux backend  backend" "$output" "expected saved-state list output without cmux"
-  assert_contains "2  Beta       mux api-1    api-1" "$output" "expected saved-state ordering without cmux"
+  assert_contains "Join a session with: mux 1 or mux a" "$output" "expected saved-state top helper without cmux"
+  assert_contains "Workspace  Title        Session" "$output" "expected saved-state list header without cmux"
+  assert_contains "1(*)  a     Alpha      mux backend  backend" "$output" "expected saved-state list output without cmux"
+  assert_contains "2     b(*)  Beta       mux api-1    api-1" "$output" "expected saved-state ordering without cmux"
+  assert_contains "(*) selector conflicts with an existing tmux session name" "$output" "expected saved-state conflict hint without cmux"
+  assert_contains "Tip: use mux 1 or mux a to join a listed session" "$output" "expected saved-state bottom helper without cmux"
 
   PATH="$stub_dir:/usr/bin:/bin" \
   MUX_STATE_FILE="$state_file" \
@@ -782,12 +994,15 @@ main() {
   test_bare_name_uses_tmux_new_session_and_renames_cmux_tab
   test_mux_launch_persists_before_entering_tmux
   test_mux_tab_launch_persists_before_entering_tmux
-  test_exact_integer_tab_names_are_rejected
+  test_exact_integer_tab_names_still_launch
   test_non_integer_names_still_launch
   test_mux_list_prints_numbered_mux_tabs_only
+  test_mux_list_hides_conflict_marker_when_no_selector_conflicts_exist
   test_mux_numeric_selection_attaches_by_list_index
+  test_mux_letter_selection_attaches_by_list_key
   test_mux_numeric_selection_does_not_launch_tmux_from_list_stdin
   test_mux_numeric_selection_rejects_unknown_index
+  test_mux_unmatched_numeric_and_letter_fall_back_to_session_names
   test_mux_list_and_index_work_without_cmux_using_saved_state
   test_persist_rewrites_state_with_only_mux_tabs
   test_restore_respawns_matching_saved_mux_tabs_best_effort
