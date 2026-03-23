@@ -3,7 +3,8 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: mux <name>
+usage: mux
+       mux <name>
        mux <index>
        mux <command>
 
@@ -455,6 +456,9 @@ EOF
 
 main() {
   case "${1:-}" in
+    "")
+      cmd_list
+      ;;
     tab)
       shift
       cmd_tab "$@"
@@ -471,7 +475,7 @@ main() {
       shift
       cmd_restore "$@"
       ;;
-    ""|-h|--help|help)
+    -h|--help|help)
       usage
       ;;
     *)

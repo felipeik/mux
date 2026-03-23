@@ -4,10 +4,12 @@ Standalone Bash CLI for restoring tmux-backed terminals inside cmux.
 
 ## Commands
 
+- `mux` is an alias for `mux list`.
 - `mux <name>` attaches or creates a tmux session with `tmux new-session -A -s <name>`.
 - `mux tab <name>` does the same, but keeps the visible tab title in the legacy `mux tab <name>` format.
 - `mux list` shows the current mux-backed tabs in a table with numeric and letter selectors.
 - `mux <selector>` such as `mux 1` or `mux a` joins the matching listed mux tab when a selector match exists.
+- `mux -h`, `mux --help`, and `mux help` print usage.
 - `mux persist` rewrites the saved snapshot for all current cmux workspaces.
 - `mux restore` best-effort restores only saved `mux <name>` and `mux tab <name>` terminals in existing cmux workspaces.
 

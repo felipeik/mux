@@ -16,10 +16,65 @@ write_executable() {
   chmod +x "$path"
 }
 
-test_cli_help_requires_script() {
-  local output
-  output="$("$ROOT_DIR/bin/mux" 2>&1 || true)"
-  assert_contains "usage" "$output" "expected mux help output"
+test_cli_help_flags_print_usage() {
+  local short_output long_output
+  short_output="$("$ROOT_DIR/bin/mux" -h 2>&1 || true)"
+  long_output="$("$ROOT_DIR/bin/mux" --help 2>&1 || true)"
+  assert_contains "usage" "$short_output" "expected mux -h output"
+  assert_contains "usage" "$long_output" "expected mux --help output"
+}
+
+test_mux_with_no_args_matches_mux_list() {
+  local temp_dir stub_dir bare_output list_output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  bare_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" 2>&1 || true)"
+  list_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
+
+  assert_eq "$list_output" "$bare_output" "expected bare mux to match mux list output"
+  assert_contains "Join a session with: mux 1 or mux a" "$bare_output" "expected bare mux to show list helper text"
 }
 
 test_tab_uses_tmux_new_session_and_renames_cmux_tab() {
@@ -989,7 +1044,8 @@ test_readme_documents_supported_commands() {
 }
 
 main() {
-  test_cli_help_requires_script
+  test_cli_help_flags_print_usage
+  test_mux_with_no_args_matches_mux_list
   test_tab_uses_tmux_new_session_and_renames_cmux_tab
   test_bare_name_uses_tmux_new_session_and_renames_cmux_tab
   test_mux_launch_persists_before_entering_tmux
