@@ -1,0 +1,194 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+usage: mux <command>
+
+Commands:
+  tab <name>
+  persist
+  restore
+EOF
+}
+
+state_file_path() {
+  if [ -n "${MUX_STATE_FILE:-}" ]; then
+    printf '%s\n' "$MUX_STATE_FILE"
+  else
+    printf '%s\n' "${XDG_STATE_HOME:-$HOME/.local/state}/mux/state.json"
+  fi
+}
+
+ensure_command() {
+  local name="$1"
+  if ! command -v "$name" >/dev/null 2>&1; then
+    echo "missing required command: $name" >&2
+    exit 1
+  fi
+}
+
+script_path() {
+  local dir
+  if [ -n "${MUX_SELF_PATH:-}" ]; then
+    printf '%s\n' "$MUX_SELF_PATH"
+    return
+  fi
+
+  dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+  printf '%s/%s\n' "$dir" "$(basename -- "$0")"
+}
+
+shell_quote() {
+  printf "'%s'" "$(printf '%s' "$1" | sed "s/'/'\\\\''/g")"
+}
+
+rename_cmux_tab() {
+  local title="$1"
+  if [ -n "${CMUX_WORKSPACE_ID:-}" ] && [ -n "${CMUX_SURFACE_ID:-}" ] && command -v cmux >/dev/null 2>&1; then
+    cmux rename-tab --workspace "$CMUX_WORKSPACE_ID" --surface "$CMUX_SURFACE_ID" "$title" >/dev/null 2>&1 || true
+  fi
+}
+
+cmd_tab() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    echo "mux tab requires a session name" >&2
+    exit 1
+  fi
+
+  rename_cmux_tab "mux tab $name"
+  exec tmux new-session -A -s "$name"
+}
+
+cmd_persist() {
+  local state_file temp_file
+
+  ensure_command cmux
+  ensure_command jq
+
+  state_file="$(state_file_path)"
+  mkdir -p "$(dirname "$state_file")"
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/mux-state.XXXXXX")"
+
+  cmux tree --all --json | jq '
+    {
+      version: 1,
+      workspaces: [
+        .windows[]?.workspaces[]? as $workspace |
+        {
+          title: $workspace.title,
+          entries: [
+            $workspace.panes[]? as $pane |
+            $pane.surfaces[]? |
+            select(.type == "terminal" and (.title | test("^mux tab .+"))) |
+            {
+              title: .title,
+              session: (.title | capture("^mux tab (?<session>.+)$").session),
+              pane_index: $pane.index,
+              surface_index_in_pane: .index_in_pane
+            }
+          ]
+        }
+      ]
+    }
+  ' >"$temp_file"
+
+  mv "$temp_file" "$state_file"
+  printf 'persisted %s\n' "$state_file"
+}
+
+cmd_restore() {
+  local state_file current_tree self_path workspace_json workspace_title workspace_ref
+  local entry_json pane_index surface_index session surface_ref command_string
+
+  ensure_command cmux
+  ensure_command jq
+
+  state_file="$(state_file_path)"
+  if [ ! -f "$state_file" ]; then
+    echo "missing state file: $state_file" >&2
+    echo "run: mux persist" >&2
+    exit 1
+  fi
+
+  current_tree="$(cmux tree --all --json)"
+  self_path="$(script_path)"
+
+  while IFS= read -r workspace_json; do
+    [ -n "$workspace_json" ] || continue
+    workspace_title="$(printf '%s\n' "$workspace_json" | jq -r '.title')"
+    workspace_ref="$(printf '%s\n' "$current_tree" | jq -r --arg title "$workspace_title" '
+      first(.windows[]?.workspaces[]? | select(.title == $title) | .ref) // empty
+    ')"
+
+    if [ -z "$workspace_ref" ]; then
+      printf 'skipping workspace %s\n' "$workspace_title"
+      continue
+    fi
+
+    while IFS= read -r entry_json; do
+      [ -n "$entry_json" ] || continue
+      pane_index="$(printf '%s\n' "$entry_json" | jq -r '.pane_index')"
+      surface_index="$(printf '%s\n' "$entry_json" | jq -r '.surface_index_in_pane')"
+      session="$(printf '%s\n' "$entry_json" | jq -r '.session')"
+
+      surface_ref="$(printf '%s\n' "$current_tree" | jq -r \
+        --arg title "$workspace_title" \
+        --argjson pane_index "$pane_index" \
+        --argjson surface_index "$surface_index" '
+          first(
+            .windows[]?.workspaces[]?
+            | select(.title == $title)
+            | .panes[]?
+            | select(.index == $pane_index)
+            | .surfaces[]?
+            | select(.type == "terminal" and .index_in_pane == $surface_index)
+            | .ref
+          ) // empty
+        ')"
+
+      if [ -z "$surface_ref" ]; then
+        printf 'skipping tab %s in workspace %s\n' "$session" "$workspace_title"
+        continue
+      fi
+
+      command_string="$(shell_quote "$self_path") tab $(shell_quote "$session")"
+      if cmux respawn-pane --workspace "$workspace_ref" --surface "$surface_ref" --command "$command_string" >/dev/null 2>&1; then
+        printf 'restored %s: %s\n' "$workspace_title" "$session"
+      else
+        printf 'skipping restore for %s: %s\n' "$workspace_title" "$session"
+      fi
+    done <<EOF
+$(printf '%s\n' "$workspace_json" | jq -c '.entries[]?')
+EOF
+  done <<EOF
+$(jq -c '.workspaces[]?' "$state_file")
+EOF
+}
+
+main() {
+  case "${1:-}" in
+    tab)
+      shift
+      cmd_tab "$@"
+      ;;
+    persist)
+      shift
+      cmd_persist "$@"
+      ;;
+    restore)
+      shift
+      cmd_restore "$@"
+      ;;
+    ""|-h|--help|help)
+      usage
+      ;;
+    *)
+      usage >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
