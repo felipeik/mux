@@ -1,6 +1,6 @@
 # Mux Backlog
 
-**Current state:** `bin/mux` now auto-saves on mux-managed session entry, `mux save` and `mux s` rewrite the snapshot on demand, `mux list` exposes numeric and letter selectors, bare selectors fall back to literal tmux session names when no listed mux tab matches, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
+**Current state:** `bin/mux` now auto-saves on mux-managed session entry, `mux save` and `mux s` rewrite the snapshot on demand, `mux list` exposes numeric and letter selectors, bare selectors fall back to literal tmux session names when no listed mux tab matches, `mux cleanup` removes orphan tmux sessions from the live `cmux` host after confirmation, remote shells can still use `mux` without `cmux`, and `README.md` documents the current CLI behavior.
 
 ## Remaining Work
 
@@ -34,23 +34,6 @@
 - Kill the tmux session for the resolved target.
 - Do not close the matching cmux tab as part of the command flow.
 - Document the command behavior and examples in `README.md`.
-
-### Task 3: Add `mux cleanup` for Non-Snapshotted tmux Sessions
-
-**Files:**
-- Update: `bin/mux`
-- Update: `README.md`
-
-**Goal:** support `mux cleanup` as a bulk cleanup command that finds tmux sessions not represented in the current mux snapshot, shows the sessions that would be removed, asks for an explicit `yes` confirmation, and then kills all listed tmux sessions.
-
-**Requirements:**
-- Read the current mux snapshot and derive the set of tmux session names tracked by mux-managed tabs.
-- List tmux sessions that exist in tmux but are not present in the mux snapshot.
-- Show the unmatched session names before any destructive action happens.
-- Require an explicit `yes` confirmation before proceeding with deletion.
-- Kill every listed unmatched tmux session after confirmation.
-- Abort without changes for any answer other than `yes`.
-- Document the command behavior, confirmation requirement, and examples in `README.md`.
 
 ### Task 5: Make `mux` Show Help and Add Non-Destructive Command Aliases
 
