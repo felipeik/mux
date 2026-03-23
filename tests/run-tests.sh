@@ -49,6 +49,33 @@ EOF
   assert_contains "tmux:new-session -A -s claude-123" "$(cat "$log_file")" "expected tmux new-session -A -s"
 }
 
+test_bare_name_uses_tmux_new_session_and_renames_cmux_tab() {
+  local temp_dir stub_dir log_file
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  PATH="$stub_dir:$PATH" \
+  CMUX_WORKSPACE_ID="workspace:1" \
+  CMUX_SURFACE_ID="surface:9" \
+  "$ROOT_DIR/bin/mux" claude-123 || true
+
+  assert_file_exists "$log_file"
+  assert_contains "cmux:rename-tab --workspace workspace:1 --surface surface:9 mux claude-123" "$(cat "$log_file")" "expected cmux tab rename for bare alias"
+  assert_contains "tmux:new-session -A -s claude-123" "$(cat "$log_file")" "expected tmux new-session -A -s for bare alias"
+}
+
 test_persist_rewrites_state_with_only_mux_tabs() {
   local temp_dir stub_dir state_file tree_json
   temp_dir="$(make_temp_dir)"
@@ -109,7 +136,7 @@ test_persist_rewrites_state_with_only_mux_tabs() {
                   "ref": "surface:21",
                   "pane_ref": "pane:3",
                   "type": "terminal",
-                  "title": "mux tab backend",
+                  "title": "mux backend",
                   "index_in_pane": 1
                 }
               ]
@@ -144,7 +171,8 @@ EOF
   assert_json_filter_equals "$state_file" '.workspaces[0].entries | length' "1"
   assert_json_filter_equals "$state_file" '.workspaces[0].entries[0].session' "claude-123"
   assert_json_filter_equals "$state_file" '.workspaces[0].entries[0].pane_index' "0"
-  assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].title' "mux tab backend"
+  assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].title' "mux backend"
+  assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].session' "backend"
 }
 
 test_restore_respawns_matching_saved_mux_tabs_best_effort() {
@@ -174,7 +202,7 @@ test_restore_respawns_matching_saved_mux_tabs_best_effort() {
       "title": "Beta",
       "entries": [
         {
-          "title": "mux tab backend",
+          "title": "mux backend",
           "session": "backend",
           "pane_index": 1,
           "surface_index_in_pane": 0
@@ -228,7 +256,7 @@ EOF
                 {
                   "ref": "surface:200",
                   "type": "terminal",
-                  "title": "mux tab backend",
+                  "title": "mux backend",
                   "index_in_pane": 0
                 }
               ]
@@ -268,12 +296,15 @@ EOF
 
   assert_contains "respawn:respawn-pane --workspace workspace:10 --surface surface:100 --command" "$(cat "$log_file")" "expected restore for Alpha"
   assert_contains "respawn:respawn-pane --workspace workspace:20 --surface surface:200 --command" "$(cat "$log_file")" "expected restore attempt for Beta"
+  assert_contains "'$ROOT_DIR/bin/mux' tab 'claude-123'" "$(cat "$log_file")" "expected legacy restore command"
+  assert_contains "'$ROOT_DIR/bin/mux' 'backend'" "$(cat "$log_file")" "expected alias restore command"
   assert_contains "skipping workspace Missing" "$(cat "$temp_dir/stdout.txt")" "expected missing workspace notice"
 }
 
 test_readme_documents_supported_commands() {
   local readme
   readme="$(cat "$ROOT_DIR/README.md")"
+  assert_contains "mux <name>" "$readme" "expected bare alias usage in README"
   assert_contains "mux tab <name>" "$readme" "expected tab usage in README"
   assert_contains "mux persist" "$readme" "expected persist usage in README"
   assert_contains "mux restore" "$readme" "expected restore usage in README"
@@ -282,6 +313,7 @@ test_readme_documents_supported_commands() {
 main() {
   test_cli_help_requires_script
   test_tab_uses_tmux_new_session_and_renames_cmux_tab
+  test_bare_name_uses_tmux_new_session_and_renames_cmux_tab
   test_persist_rewrites_state_with_only_mux_tabs
   test_restore_respawns_matching_saved_mux_tabs_best_effort
   test_readme_documents_supported_commands

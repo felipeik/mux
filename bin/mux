@@ -3,9 +3,11 @@ set -euo pipefail
 
 usage() {
   cat <<'EOF'
-usage: mux <command>
+usage: mux <name>
+       mux <command>
 
 Commands:
+  <name>
   tab <name>
   persist
   restore
@@ -50,6 +52,35 @@ rename_cmux_tab() {
   fi
 }
 
+title_session() {
+  local title="$1"
+  case "$title" in
+    "mux tab "*) printf '%s\n' "${title#mux tab }" ;;
+    "mux "*) printf '%s\n' "${title#mux }" ;;
+    *) return 1 ;;
+  esac
+}
+
+command_string_for_title() {
+  local self_path="$1"
+  local title="$2"
+  local session
+
+  session="$(title_session "$title")" || return 1
+
+  case "$title" in
+    "mux tab "*)
+      printf '%s tab %s' "$(shell_quote "$self_path")" "$(shell_quote "$session")"
+      ;;
+    "mux "*)
+      printf '%s %s' "$(shell_quote "$self_path")" "$(shell_quote "$session")"
+      ;;
+    *)
+      return 1
+      ;;
+  esac
+}
+
 cmd_tab() {
   local name="${1:-}"
   if [ -z "$name" ]; then
@@ -58,6 +89,17 @@ cmd_tab() {
   fi
 
   rename_cmux_tab "mux tab $name"
+  exec tmux new-session -A -s "$name"
+}
+
+cmd_name() {
+  local name="${1:-}"
+  if [ -z "$name" ]; then
+    echo "mux requires a session name" >&2
+    exit 1
+  fi
+
+  rename_cmux_tab "mux $name"
   exec tmux new-session -A -s "$name"
 }
 
@@ -81,10 +123,10 @@ cmd_persist() {
           entries: [
             $workspace.panes[]? as $pane |
             $pane.surfaces[]? |
-            select(.type == "terminal" and (.title | test("^mux tab .+"))) |
+            select(.type == "terminal" and (.title | test("^mux( tab)? .+"))) |
             {
               title: .title,
-              session: (.title | capture("^mux tab (?<session>.+)$").session),
+              session: (.title | capture("^mux( tab)? (?<session>.+)$").session),
               pane_index: $pane.index,
               surface_index_in_pane: .index_in_pane
             }
@@ -100,7 +142,7 @@ cmd_persist() {
 
 cmd_restore() {
   local state_file current_tree self_path workspace_json workspace_title workspace_ref
-  local entry_json pane_index surface_index session surface_ref command_string
+  local entry_json pane_index surface_index session title surface_ref command_string
 
   ensure_command cmux
   ensure_command jq
@@ -131,6 +173,7 @@ cmd_restore() {
       [ -n "$entry_json" ] || continue
       pane_index="$(printf '%s\n' "$entry_json" | jq -r '.pane_index')"
       surface_index="$(printf '%s\n' "$entry_json" | jq -r '.surface_index_in_pane')"
+      title="$(printf '%s\n' "$entry_json" | jq -r '.title')"
       session="$(printf '%s\n' "$entry_json" | jq -r '.session')"
 
       surface_ref="$(printf '%s\n' "$current_tree" | jq -r \
@@ -153,7 +196,7 @@ cmd_restore() {
         continue
       fi
 
-      command_string="$(shell_quote "$self_path") tab $(shell_quote "$session")"
+      command_string="$(command_string_for_title "$self_path" "$title")"
       if cmux respawn-pane --workspace "$workspace_ref" --surface "$surface_ref" --command "$command_string" >/dev/null 2>&1; then
         printf 'restored %s: %s\n' "$workspace_title" "$session"
       else
@@ -185,8 +228,7 @@ main() {
       usage
       ;;
     *)
-      usage >&2
-      exit 1
+      cmd_name "$@"
       ;;
   esac
 }

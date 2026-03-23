@@ -2,176 +2,135 @@
 
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
-**Goal:** Build a standalone Bash CLI named `mux` that snapshots all cmux workspaces and best-effort restores only terminals created as `mux tab <name>`.
+**Goal:** Add `mux <name>` as the preferred alias for `mux tab <name>` while preserving persist/restore compatibility for both title formats.
 
-**Architecture:** The CLI is a single Bash entrypoint supported by a small shell test harness. `persist` reads `cmux` JSON and rewrites one state file; `restore` matches current workspaces by title and respawns only recognized tmux-backed terminal surfaces with `mux tab <name>`.
+**Architecture:** The CLI stays as a single Bash entrypoint with shell-based tests. Command parsing will treat an unknown first token as a session name, visible cmux tab titles will use `mux <name>` for the new shortcut, and persist/restore detection will recognize both `mux <name>` and `mux tab <name>` so old and new sessions restore to the same tmux target.
 
 **Tech Stack:** Bash, jq, cmux CLI, tmux, shell-based test scripts
 
 ---
 
-### Task 1: Project Skeleton
+### Task 1: Add Failing Alias Tests
 
 **Files:**
-- Create: `mux/bin/mux`
-- Create: `mux/README.md`
-- Create: `mux/tests/run-tests.sh`
-- Create: `mux/tests/helpers/assert.sh`
+- Modify: `bin/mux`
+- Modify: `tests/run-tests.sh`
 
 **Step 1: Write the failing test**
 
-Create a test runner that expects `mux/bin/mux` to exist and respond to `help`.
+Add a shell test that stubs `tmux` and `cmux`, then expects `mux claude-123` to rename the visible tab to `mux claude-123` and run `tmux new-session -A -s claude-123`.
 
 **Step 2: Run test to verify it fails**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: FAIL because `mux/bin/mux` does not exist yet.
+Run: `bash tests/run-tests.sh`
+Expected: FAIL because bare session names are not recognized yet.
 
 **Step 3: Write minimal implementation**
 
-Create an executable Bash script with command dispatch for `tab`, `persist`, and `restore`.
+Do not implement yet. Keep the code unchanged so the red step stays valid.
 
 **Step 4: Run test to verify it passes**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: PASS for the help/dispatch bootstrap test.
+Skip until implementation is added in Task 3.
 
 **Step 5: Commit**
 
 ```bash
-git add mux/bin/mux mux/README.md mux/tests/run-tests.sh mux/tests/helpers/assert.sh
-git commit -m "feat: scaffold mux cli"
+git add tests/run-tests.sh
+git commit -m "test: cover bare mux session alias"
 ```
 
-### Task 2: Implement `mux tab`
+### Task 2: Add Failing Persist and Restore Compatibility Tests
 
 **Files:**
-- Modify: `mux/bin/mux`
-- Modify: `mux/tests/run-tests.sh`
+- Modify: `bin/mux`
+- Modify: `tests/run-tests.sh`
 
 **Step 1: Write the failing test**
 
-Add a test that stubs `tmux` and expects `mux tab claude-123` to invoke `tmux new-session -A -s claude-123`.
+Extend the shell tests so `persist` saves both `mux tab backend` and `mux backend`, and `restore` respawns both formats using the session name parsed from each title.
 
 **Step 2: Run test to verify it fails**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: FAIL because `tab` does not call tmux correctly.
+Run: `bash tests/run-tests.sh`
+Expected: FAIL because the current jq patterns only recognize `mux tab <name>`.
 
 **Step 3: Write minimal implementation**
 
-Implement `tab` with input validation and `exec tmux new-session -A -s "$name"`.
+Do not implement yet. Keep the code unchanged so the red step stays valid.
 
 **Step 4: Run test to verify it passes**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: PASS for `tab`.
+Skip until implementation is added in Task 3.
 
 **Step 5: Commit**
 
 ```bash
-git add mux/bin/mux mux/tests/run-tests.sh
-git commit -m "feat: add mux tab"
+git add tests/run-tests.sh
+git commit -m "test: cover mux title compatibility"
 ```
 
-### Task 3: Implement `persist`
+### Task 3: Implement Bare Session Alias and Shared Title Parsing
 
 **Files:**
-- Modify: `mux/bin/mux`
-- Modify: `mux/tests/run-tests.sh`
+- Modify: `bin/mux`
+- Modify: `tests/run-tests.sh`
 
 **Step 1: Write the failing test**
 
-Add tests that stub `cmux tree --all --json`, then verify:
-
-- the state file is fully rewritten
-- only terminal surfaces titled `mux tab <name>` are saved
-- workspaces are keyed by title
+Reuse the failing tests from Tasks 1 and 2.
 
 **Step 2: Run test to verify it fails**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: FAIL because `persist` is missing or writes the wrong JSON.
+Run: `bash tests/run-tests.sh`
+Expected: FAIL on bare-session dispatch and mixed title parsing.
 
 **Step 3: Write minimal implementation**
 
-Implement `persist` using `jq` to extract recognized surfaces and write a single JSON state file.
+Update `bin/mux` so:
+
+- help shows `mux <name>` as preferred usage
+- a bare first argument is treated as `cmd_tab "$1"`
+- the visible cmux title becomes `mux <name>` for bare-session launches
+- title parsing and restore command generation accept both `mux <name>` and `mux tab <name>`
 
 **Step 4: Run test to verify it passes**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: PASS for `persist`.
+Run: `bash tests/run-tests.sh`
+Expected: PASS for the new alias tests and the existing suite.
 
 **Step 5: Commit**
 
 ```bash
-git add mux/bin/mux mux/tests/run-tests.sh
-git commit -m "feat: add mux persist"
+git add bin/mux tests/run-tests.sh
+git commit -m "feat: add bare mux session alias"
 ```
 
-### Task 4: Implement `restore`
+### Task 4: Refresh Documentation
 
 **Files:**
-- Modify: `mux/bin/mux`
-- Modify: `mux/tests/run-tests.sh`
+- Modify: `README.md`
 
 **Step 1: Write the failing test**
 
-Add tests that stub current cmux workspaces and validate:
-
-- matching happens by workspace title
-- missing workspaces are skipped
-- existing terminal surfaces are matched by saved pane position
-- `cmux respawn-pane` is used to run `mux tab <name>`
-- failures on one restore target do not stop the rest
+Inspect the current README usage text and identify the stale command examples that still imply `mux tab <name>` is the only supported session entrypoint.
 
 **Step 2: Run test to verify it fails**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: FAIL because `restore` is incomplete.
+No automated README test exists, so verification here is manual file review.
 
 **Step 3: Write minimal implementation**
 
-Implement best-effort restore with per-entry error handling by respawning existing terminal surfaces.
+Document `mux <name>` as the preferred usage, note that `mux tab <name>` remains supported, and explain that persist/restore recognize both title formats.
 
 **Step 4: Run test to verify it passes**
 
-Run: `bash mux/tests/run-tests.sh`
-Expected: PASS for `restore`.
+Run: `bash tests/run-tests.sh`
+Expected: PASS unchanged after documentation updates.
 
 **Step 5: Commit**
 
 ```bash
-git add mux/bin/mux mux/tests/run-tests.sh
-git commit -m "feat: add mux restore"
-```
-
-### Task 5: Document Usage
-
-**Files:**
-- Modify: `mux/README.md`
-
-**Step 1: Write the failing test**
-
-Add a lightweight documentation check in the test runner that expects README usage examples for `tab`, `persist`, and `restore`.
-
-**Step 2: Run test to verify it fails**
-
-Run: `bash mux/tests/run-tests.sh`
-Expected: FAIL because README is incomplete.
-
-**Step 3: Write minimal implementation**
-
-Document installation, state file location, and the rule that only `mux tab <name>` terminals are restored.
-
-**Step 4: Run test to verify it passes**
-
-Run: `bash mux/tests/run-tests.sh`
-Expected: PASS.
-
-**Step 5: Commit**
-
-```bash
-git add mux/README.md
-git commit -m "docs: add mux usage"
+git add README.md
+git commit -m "docs: prefer bare mux session usage"
 ```

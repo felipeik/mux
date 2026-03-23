@@ -4,6 +4,7 @@
 
 Build a small CLI app named `mux` for macOS that works alongside `cmux` and provides:
 
+- `mux <name>` as the preferred shortcut to open or attach a named tmux session with `tmux new-session -A -s <name>`
 - `mux tab <name>` to open or attach a named tmux session with `tmux new-session -A -s <name>`
 - `mux persist` to rewrite a snapshot of all current cmux workspaces
 - `mux restore` to best-effort reopen only terminals that were launched as `mux tab <name>`
@@ -12,7 +13,7 @@ Build a small CLI app named `mux` for macOS that works alongside `cmux` and prov
 
 - Persist all current cmux workspaces by workspace title
 - Ignore browser surfaces entirely during restore
-- Ignore non-restorable terminal tabs such as `lazygit`, `codex`, or any terminal that does not match `mux tab <name>`
+- Ignore non-restorable terminal tabs such as `lazygit`, `codex`, or any terminal that does not match `mux <name>` or `mux tab <name>`
 - Do not rearrange windows, workspaces, panes, tabs, or browser state
 - Restore should be best effort and continue on per-surface failures
 
@@ -41,7 +42,7 @@ Unknown or unmatched entries are skipped silently or logged as informational mes
 
 The only restorable terminals are ones whose title clearly matches the command pattern `mux tab <name>`. This avoids brittle process inference and keeps restore deterministic.
 
-If a user wants a terminal to survive cmux crashes, that terminal should be started through `mux tab <name>`, which delegates durability to tmux.
+If a user wants a terminal to survive cmux crashes, that terminal should be started through `mux <name>` or `mux tab <name>`, which delegates durability to tmux.
 
 **Error Handling**
 
@@ -56,8 +57,10 @@ The CLI will be implemented test-first with shell tests that stub `cmux` and `tm
 
 Tests will cover:
 
+- `mux <name>` uses `tmux new-session -A -s <name>`
+- `mux <name>` renames the visible cmux tab to `mux <name>`
 - `mux tab <name>` uses `tmux new-session -A -s <name>`
-- `persist` writes only recognized `mux tab <name>` entries
+- `persist` writes only recognized `mux <name>` and `mux tab <name>` entries
 - `persist` rewrites the full state file
 - `restore` skips non-restorable entries
 - `restore` respawns recognized entries in matching workspaces by name
