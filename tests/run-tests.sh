@@ -493,6 +493,149 @@ EOF
   esac
 }
 
+test_mux_list_ignores_transient_command_titles_that_are_not_tmux_sessions() {
+  local temp_dir stub_dir output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                },
+                {
+                  "type": "terminal",
+                  "title": "mux list",
+                  "index_in_pane": 1
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "list-sessions" ] && [ "$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
+  assert_contains "1  a    Alpha      backend" "$output" "expected the real mux session to stay listed"
+  case "$output" in
+    *"Alpha      list"*|*"2  b"*)
+      fail "expected transient command-title surfaces like mux list to be excluded from mux list"
+      ;;
+  esac
+}
+
+test_mux_list_appends_unmanaged_tmux_sessions_after_mux_entries() {
+  local temp_dir stub_dir output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "title": "Beta",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux api-1",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+api-1
+ops
+stray
+OUT
+  exit 0
+fi
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$temp_dir/state.json" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
+  assert_contains "1  a    Alpha      backend" "$output" "expected managed backend row to stay first"
+  assert_contains "2  b    Beta       api-1" "$output" "expected managed api row to stay second"
+  assert_contains "3  c    -          ops" "$output" "expected first unmanaged tmux session to be appended"
+  assert_contains "4  d    -          stray" "$output" "expected second unmanaged tmux session to be appended"
+}
+
 test_mux_numeric_selection_is_invalid() {
   local temp_dir stub_dir log_file output
   temp_dir="$(make_temp_dir)"
@@ -791,6 +934,69 @@ EOF
 
   assert_file_exists "$log_file"
   assert_contains "tmux:new-session -A -s api-1" "$(cat "$log_file")" "expected mux j b to attach to the second listed session"
+}
+
+test_mux_join_selector_attaches_to_appended_unmanaged_tmux_session() {
+  local temp_dir stub_dir log_file
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  log_file="$temp_dir/log.txt"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+exit 0
+EOF
+
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+ops
+OUT
+  exit 0
+fi
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+EOF
+
+  PATH="$stub_dir:$PATH" \
+  MUX_STATE_FILE="$temp_dir/state.json" \
+  "$ROOT_DIR/bin/mux" join b || true
+
+  assert_file_exists "$log_file"
+  assert_contains "tmux:new-session -A -s ops" "$(cat "$log_file")" "expected mux join b to attach to the appended unmanaged tmux session"
 }
 
 test_mux_join_unknown_selector_does_not_fall_back_to_literal_session() {
@@ -1787,10 +1993,13 @@ main() {
   test_launch_commands_treat_literal_names_as_session_names
   test_mux_list_prints_numbered_mux_tabs_only
   test_mux_list_hides_conflict_marker_when_no_selector_conflicts_exist
+  test_mux_list_ignores_transient_command_titles_that_are_not_tmux_sessions
+  test_mux_list_appends_unmanaged_tmux_sessions_after_mux_entries
   test_mux_numeric_selection_is_invalid
   test_mux_letter_selection_is_invalid
   test_mux_join_numeric_selector_attaches_by_list_index
   test_mux_join_alias_letter_selector_attaches_by_list_key
+  test_mux_join_selector_attaches_to_appended_unmanaged_tmux_session
   test_mux_join_unknown_selector_does_not_fall_back_to_literal_session
   test_mux_join_without_selector_reads_prompt_in_interactive_mode
   test_mux_join_without_selector_prints_list_and_errors_in_non_interactive_mode

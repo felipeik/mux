@@ -84,6 +84,54 @@ command_string_for_title() {
   printf '%s tab %s' "$(shell_quote "$self_path")" "$(shell_quote "$session")"
 }
 
+raw_cmux_mux_entries() {
+  cmux tree --all --json | jq -c '
+    [
+      .windows[]?.workspaces[]? as $workspace |
+      $workspace.panes[]? as $pane |
+      $pane.surfaces[]? |
+      select(
+        .type == "terminal"
+        and (.title | startswith("mux "))
+        and (.title | startswith("mux tab ") | not)
+      ) |
+      {
+        workspace_title: $workspace.title,
+        pane_index: $pane.index,
+        surface_index_in_pane: .index_in_pane,
+        title: .title,
+        session: (.title | ltrimstr("mux "))
+      }
+    ]
+    | sort_by(.workspace_title, .pane_index, .surface_index_in_pane)
+    | .[]
+  '
+}
+
+filter_entries_to_live_tmux_sessions() {
+  local entries="$1"
+  local live_sessions entry session
+
+  if ! command -v tmux >/dev/null 2>&1; then
+    if [ -n "$entries" ]; then
+      printf '%s\n' "$entries"
+    fi
+    return 0
+  fi
+
+  live_sessions="$(tmux_session_names)"
+
+  while IFS= read -r entry; do
+    [ -n "$entry" ] || continue
+    session="$(printf '%s\n' "$entry" | jq -r '.session')"
+    if list_contains_line "$session" "$live_sessions"; then
+      printf '%s\n' "$entry"
+    fi
+  done <<EOF
+$entries
+EOF
+}
+
 best_effort_save_on_launch() {
   if ! command -v cmux >/dev/null 2>&1 || ! command -v jq >/dev/null 2>&1; then
     return 0
@@ -137,7 +185,7 @@ find_entry_by_selector() {
   local entries entry normalized_target
   local index=0 label
 
-  entries="$(live_mux_entries)"
+  entries="$(combined_mux_entries)"
   normalized_target="$(printf '%s' "$target" | tr '[:upper:]' '[:lower:]')"
 
   while IFS= read -r entry; do
@@ -157,30 +205,13 @@ EOF
 }
 
 live_mux_entries() {
+  local entries state_file
+
   ensure_command jq
 
   if command -v cmux >/dev/null 2>&1; then
-    cmux tree --all --json | jq -c '
-      [
-        .windows[]?.workspaces[]? as $workspace |
-        $workspace.panes[]? as $pane |
-        $pane.surfaces[]? |
-        select(
-          .type == "terminal"
-          and (.title | startswith("mux "))
-          and (.title | startswith("mux tab ") | not)
-        ) |
-        {
-          workspace_title: $workspace.title,
-          pane_index: $pane.index,
-          surface_index_in_pane: .index_in_pane,
-          title: .title,
-          session: (.title | ltrimstr("mux "))
-        }
-      ]
-      | sort_by(.workspace_title, .pane_index, .surface_index_in_pane)
-      | .[]
-    '
+    entries="$(raw_cmux_mux_entries)"
+    filter_entries_to_live_tmux_sessions "$entries"
     return
   fi
 
@@ -251,6 +282,46 @@ $entries
 EOF
 }
 
+unmanaged_tmux_entries() {
+  local tracked_sessions="$1"
+  local session
+
+  while IFS= read -r session; do
+    [ -n "$session" ] || continue
+    if list_contains_line "$session" "$tracked_sessions"; then
+      continue
+    fi
+
+    jq -cn \
+      --arg session "$session" \
+      '{
+        workspace_title: "-",
+        pane_index: 0,
+        surface_index_in_pane: 0,
+        title: ("mux " + $session),
+        session: $session
+      }'
+  done <<EOF
+$(tmux_session_names)
+EOF
+}
+
+combined_mux_entries() {
+  local mux_entries tracked_sessions unmanaged_entries
+
+  mux_entries="$(live_mux_entries)"
+  tracked_sessions="$(tracked_mux_sessions "$mux_entries")"
+  unmanaged_entries="$(unmanaged_tmux_entries "$tracked_sessions")"
+
+  if [ -n "$mux_entries" ]; then
+    printf '%s\n' "$mux_entries"
+  fi
+
+  if [ -n "$unmanaged_entries" ]; then
+    printf '%s\n' "$unmanaged_entries"
+  fi
+}
+
 orphan_tmux_sessions() {
   local tracked_sessions="$1"
   local session
@@ -270,7 +341,7 @@ cmd_list() {
   local width_index width_key width_workspace width_session
   local dashes_index dashes_key dashes_workspace dashes_session
 
-  entries="$(live_mux_entries)"
+  entries="$(combined_mux_entries)"
 
   width_index=1
   width_key=3
