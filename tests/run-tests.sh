@@ -32,6 +32,8 @@ test_mux_with_no_args_prints_usage() {
   local output
   output="$("$ROOT_DIR/bin/mux" 2>&1 || true)"
   assert_contains "usage: mux" "$output" "expected bare mux to print usage"
+  assert_contains "init [claude|codex]" "$output" "expected mux usage to include init"
+  assert_contains "uninstall [claude|codex]" "$output" "expected mux usage to include uninstall"
   assert_contains "list, l" "$output" "expected grouped list alias in usage"
   assert_contains "restore, r" "$output" "expected grouped restore alias in usage"
   case "$output" in
@@ -120,6 +122,415 @@ EOF
   restore_output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" restore 2>&1 || true)"
 
   assert_eq "$restore_output" "$alias_output" "expected mux r to match mux restore output"
+}
+
+test_mux_init_claude_installs_global_hooks() {
+  local temp_dir home_dir stub_dir output helper_path settings_path summary
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  stub_dir="$temp_dir/bin"
+  helper_path="$home_dir/.local/bin/mux-agent-notify"
+  settings_path="$home_dir/.claude/settings.json"
+  mkdir -p "$home_dir/.claude" "$stub_dir"
+
+  cat >"$settings_path" <<'EOF'
+{
+  "model": "haiku",
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bd prime"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+  write_executable "$stub_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  output="$(HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" init claude 2>&1 || true)"
+
+  assert_contains "installed claude hooks" "$output" "expected mux init claude to report installation"
+  assert_contains "$settings_path" "$output" "expected mux init claude to print the Claude settings path"
+  assert_contains "$helper_path" "$output" "expected mux init claude to print the helper path"
+  if [ ! -x "$helper_path" ]; then
+    fail "expected mux init claude to create an executable helper script"
+  fi
+
+  summary="$(python3 - <<'PY' "$settings_path"
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+hooks = data.get('hooks', {})
+checks = [
+    data.get('model') == 'haiku',
+    hooks.get('PreCompact', [{}])[0].get('hooks', [{}])[0].get('command') == 'bd prime',
+    any(h.get('command', '').endswith('mux-agent-notify claude-hook notification') for g in hooks.get('Notification', []) for h in g.get('hooks', [])),
+    any(h.get('command', '').endswith('mux-agent-notify claude-hook stop') for g in hooks.get('Stop', []) for h in g.get('hooks', [])),
+    any(h.get('command', '').endswith('mux-agent-notify claude-hook session-end') for g in hooks.get('SessionEnd', []) for h in g.get('hooks', [])),
+    any(h.get('command', '').endswith('mux-agent-notify claude-hook prompt-submit') for g in hooks.get('UserPromptSubmit', []) for h in g.get('hooks', [])),
+    any(h.get('command', '').endswith('mux-agent-notify claude-hook pre-tool-use') and h.get('async') is True for g in hooks.get('PreToolUse', []) for h in g.get('hooks', [])),
+]
+print('ok' if all(checks) else 'bad')
+PY
+)"
+  assert_eq "ok" "$summary" "expected mux init claude to merge the supported hooks into ~/.claude/settings.json"
+}
+
+test_mux_init_claude_project_scope_installs_project_hooks() {
+  local temp_dir home_dir project_dir stub_dir output helper_path settings_path summary
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  project_dir="$temp_dir/project"
+  stub_dir="$temp_dir/bin"
+  helper_path="$home_dir/.local/bin/mux-agent-notify"
+  settings_path="$project_dir/.claude/settings.json"
+  mkdir -p "$home_dir" "$project_dir" "$stub_dir"
+  project_dir="$(cd "$project_dir" && pwd -P)"
+  settings_path="$project_dir/.claude/settings.json"
+
+  write_executable "$stub_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  output="$(cd "$project_dir" && HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" init claude --scope project 2>&1 || true)"
+
+  assert_contains "installed claude hooks" "$output" "expected project-scope install to report success"
+  assert_contains "$settings_path" "$output" "expected project-scope install to print the project Claude settings path"
+  assert_contains "$helper_path" "$output" "expected project-scope install to print the helper path"
+
+  summary="$(python3 - <<'PY' "$settings_path"
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+hooks = data.get('hooks', {})
+checks = [
+    any(h.get('command', '').endswith('mux-agent-notify claude-hook notification') for g in hooks.get('Notification', []) for h in g.get('hooks', [])),
+    any(h.get('command', '').endswith('mux-agent-notify claude-hook stop') for g in hooks.get('Stop', []) for h in g.get('hooks', [])),
+]
+print('ok' if all(checks) else 'bad')
+PY
+)"
+  assert_eq "ok" "$summary" "expected project-scope install to write Claude hooks into .claude/settings.json"
+}
+
+test_mux_init_helper_writes_tmux_notifications_to_tty() {
+  local temp_dir home_dir stub_dir helper_path tty_path output tty_output
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  stub_dir="$temp_dir/bin"
+  helper_path="$home_dir/.local/bin/mux-agent-notify"
+  tty_path="$temp_dir/fake-tty"
+  mkdir -p "$home_dir" "$stub_dir"
+
+  write_executable "$stub_dir/claude" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" init claude >/dev/null 2>&1 || true
+
+  output="$(printf '{"message":"manual helper notification"}' \
+    | HOME="$home_dir" TMUX=1 CMUX_SURFACE_ID=surface-1 MUX_AGENT_NOTIFY_TTY_PATH="$tty_path" "$helper_path" claude-hook notification)"
+  tty_output="$(cat "$tty_path" 2>/dev/null || true)"
+
+  assert_eq "" "$output" "expected tmux hook notifications to avoid stdout so Claude cannot capture the OSC payload"
+  assert_contains "]777;notify;Claude Code;Attention: manual helper notification" "$tty_output" "expected tmux hook notifications to be written to the pane tty"
+}
+
+test_mux_uninstall_claude_removes_user_project_and_local_project_hooks() {
+  local temp_dir home_dir project_dir project_dir_real stub_dir helper_path user_settings_path project_settings_path local_project_settings_path output summary
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  project_dir="$temp_dir/project"
+  stub_dir="$temp_dir/bin"
+  helper_path="$home_dir/.local/bin/mux-agent-notify"
+  user_settings_path="$home_dir/.claude/settings.json"
+  mkdir -p "$home_dir/.claude" "$project_dir/.claude" "$stub_dir"
+  project_dir_real="$(cd "$project_dir" && pwd -P)"
+  project_settings_path="$project_dir_real/.claude/settings.json"
+  local_project_settings_path="$project_dir_real/.claude/settings.local.json"
+
+  cat >"$user_settings_path" <<EOF
+{
+  "hooks": {
+    "PreCompact": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "bd prime"
+          }
+        ]
+      }
+    ],
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$helper_path claude-hook notification"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$helper_path claude-hook stop"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+  cat >"$project_settings_path" <<EOF
+{
+  "hooks": {
+    "Notification": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$helper_path claude-hook notification"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+  cat >"$local_project_settings_path" <<EOF
+{
+  "hooks": {
+    "Stop": [
+      {
+        "matcher": "",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$helper_path claude-hook stop"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+  output="$(cd "$project_dir_real" && HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" uninstall claude 2>&1 || true)"
+
+  assert_contains "removed claude hooks" "$output" "expected mux uninstall claude to report removal"
+  assert_contains "$user_settings_path" "$output" "expected mux uninstall claude to print the user Claude settings path"
+  assert_contains "$project_settings_path" "$output" "expected mux uninstall claude to print the project Claude settings path"
+  assert_contains "$local_project_settings_path" "$output" "expected mux uninstall claude to print the local-project Claude settings path"
+
+  summary="$(python3 - <<'PY' "$user_settings_path" "$project_settings_path" "$local_project_settings_path"
+import json, sys
+
+def load(path):
+    with open(path, 'r', encoding='utf-8') as fh:
+        return json.load(fh)
+
+user_data = load(sys.argv[1])
+project_data = load(sys.argv[2])
+local_data = load(sys.argv[3])
+
+user_hooks = user_data.get('hooks', {})
+project_hooks = project_data.get('hooks', {})
+local_hooks = local_data.get('hooks', {})
+
+checks = [
+    user_hooks.get('PreCompact', [{}])[0].get('hooks', [{}])[0].get('command') == 'bd prime',
+    not user_hooks.get('Notification'),
+    not user_hooks.get('Stop'),
+    not project_hooks.get('Notification'),
+    not local_hooks.get('Stop'),
+]
+print('ok' if all(checks) else 'bad')
+PY
+)"
+  assert_eq "ok" "$summary" "expected mux uninstall claude to remove mux-managed Claude hooks from user, project, and local-project scopes"
+}
+
+test_mux_init_codex_installs_global_hooks() {
+  local temp_dir home_dir stub_dir output helper_path config_path hooks_path summary
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  stub_dir="$temp_dir/bin"
+  helper_path="$home_dir/.local/bin/mux-agent-notify"
+  config_path="$home_dir/.codex/config.toml"
+  hooks_path="$home_dir/.codex/hooks.json"
+  mkdir -p "$home_dir/.codex" "$stub_dir"
+
+  cat >"$config_path" <<'EOF'
+model = "gpt-5.4"
+personality = "pragmatic"
+EOF
+
+  write_executable "$stub_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  output="$(HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" init codex 2>&1 || true)"
+
+  assert_contains "installed codex hooks" "$output" "expected mux init codex to report installation"
+  assert_contains "$hooks_path" "$output" "expected mux init codex to print the Codex hooks path"
+  assert_contains "$config_path" "$output" "expected mux init codex to print the Codex config path"
+  assert_contains "$helper_path" "$output" "expected mux init codex to print the helper path"
+  if [ ! -x "$helper_path" ]; then
+    fail "expected mux init codex to create an executable helper script"
+  fi
+  assert_contains "codex_hooks = true" "$(cat "$config_path")" "expected mux init codex to enable codex hooks in config.toml"
+  assert_contains "model = \"gpt-5.4\"" "$(cat "$config_path")" "expected mux init codex to preserve existing config values"
+
+  summary="$(python3 - <<'PY' "$hooks_path"
+import json, sys
+with open(sys.argv[1], 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+hooks = data.get('hooks', {})
+checks = [
+    any(h.get('command', '').endswith('mux-agent-notify codex-hook session-start') for g in hooks.get('SessionStart', []) for h in g.get('hooks', [])),
+    any(h.get('command', '').endswith('mux-agent-notify codex-hook prompt-submit') for g in hooks.get('UserPromptSubmit', []) for h in g.get('hooks', [])),
+    any(h.get('command', '').endswith('mux-agent-notify codex-hook stop') for g in hooks.get('Stop', []) for h in g.get('hooks', [])),
+]
+print('ok' if all(checks) else 'bad')
+PY
+)"
+  assert_eq "ok" "$summary" "expected mux init codex to write the cmux-compatible global hook file"
+}
+
+test_mux_uninstall_codex_removes_only_mux_hooks_and_feature_flag() {
+  local temp_dir home_dir stub_dir helper_path config_path hooks_path output summary
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  stub_dir="$temp_dir/bin"
+  helper_path="$home_dir/.local/bin/mux-agent-notify"
+  config_path="$home_dir/.codex/config.toml"
+  hooks_path="$home_dir/.codex/hooks.json"
+  mkdir -p "$home_dir/.codex" "$home_dir/.local/bin" "$stub_dir"
+
+  cat >"$config_path" <<'EOF'
+model = "gpt-5.4"
+
+[features]
+codex_hooks = true
+EOF
+
+  cat >"$hooks_path" <<EOF
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$helper_path codex-hook session-start"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$helper_path codex-hook stop"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$helper_path codex-hook prompt-submit"
+          }
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+  output="$(HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" uninstall codex 2>&1 || true)"
+
+  assert_contains "removed codex hooks" "$output" "expected mux uninstall codex to report removal"
+  assert_contains "$hooks_path" "$output" "expected mux uninstall codex to print the Codex hooks path"
+  assert_contains "$config_path" "$output" "expected mux uninstall codex to print the Codex config path"
+
+  summary="$(python3 - <<'PY' "$hooks_path" "$config_path"
+import json, sys
+hooks_path, config_path = sys.argv[1], sys.argv[2]
+with open(hooks_path, 'r', encoding='utf-8') as fh:
+    data = json.load(fh)
+hooks = data.get('hooks', {})
+config = open(config_path, 'r', encoding='utf-8').read()
+checks = [
+    not hooks.get('SessionStart'),
+    not hooks.get('Stop'),
+    not hooks.get('UserPromptSubmit'),
+    'codex_hooks = true' not in config,
+]
+print('ok' if all(checks) else 'bad')
+PY
+)"
+  assert_eq "ok" "$summary" "expected mux uninstall codex to remove mux-managed Codex hooks and disable the feature flag when nothing remains"
+}
+
+test_mux_init_codex_rejects_project_scope() {
+  local temp_dir home_dir project_dir stub_dir output
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  project_dir="$temp_dir/project"
+  stub_dir="$temp_dir/bin"
+  mkdir -p "$home_dir" "$project_dir" "$stub_dir"
+
+  write_executable "$stub_dir/codex" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  output="$(cd "$project_dir" && HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" init codex --scope project 2>&1 || true)"
+
+  assert_contains "codex only supports --scope user" "$output" "expected project-scope Codex install to explain the unsupported scope"
+}
+
+test_mux_init_all_skips_missing_apps() {
+  local temp_dir home_dir stub_dir output
+  temp_dir="$(make_temp_dir)"
+  home_dir="$temp_dir/home"
+  stub_dir="$temp_dir/bin"
+  mkdir -p "$home_dir" "$stub_dir"
+
+  output="$(HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$ROOT_DIR/bin/mux" init 2>&1 || true)"
+
+  assert_contains "skipping claude: not installed" "$output" "expected mux init to skip claude when it is missing"
+  assert_contains "skipping codex: not installed" "$output" "expected mux init to skip codex when it is missing"
+  if [ -e "$home_dir/.local/bin/mux-agent-notify" ]; then
+    fail "expected mux init to avoid writing helper files when no supported apps are installed"
+  fi
 }
 
 test_tab_uses_tmux_new_session_and_renames_cmux_tab() {
@@ -2043,6 +2454,11 @@ test_readme_documents_supported_commands() {
   assert_contains "mux tab <name>" "$readme" "expected tab usage in README"
   assert_contains "mux join <selector>" "$readme" "expected join usage in README"
   assert_contains "mux j <selector>" "$readme" "expected join alias usage in README"
+  assert_contains "mux init" "$readme" "expected init usage in README"
+  assert_contains "mux init claude" "$readme" "expected claude init example in README"
+  assert_contains "mux init codex" "$readme" "expected codex init example in README"
+  assert_contains "mux uninstall" "$readme" "expected uninstall usage in README"
+  assert_contains "--scope project" "$readme" "expected project-scope example in README"
   assert_contains "mux save" "$readme" "expected save usage in README"
   assert_contains "mux s" "$readme" "expected short save usage in README"
   assert_contains "mux cleanup" "$readme" "expected cleanup usage in README"
@@ -2064,6 +2480,14 @@ main() {
   test_mux_with_no_args_prints_usage
   test_mux_l_alias_matches_mux_list
   test_mux_r_alias_matches_mux_restore
+  test_mux_init_claude_installs_global_hooks
+  test_mux_init_claude_project_scope_installs_project_hooks
+  test_mux_init_helper_writes_tmux_notifications_to_tty
+  test_mux_uninstall_claude_removes_user_project_and_local_project_hooks
+  test_mux_init_codex_installs_global_hooks
+  test_mux_uninstall_codex_removes_only_mux_hooks_and_feature_flag
+  test_mux_init_codex_rejects_project_scope
+  test_mux_init_all_skips_missing_apps
   test_tab_uses_tmux_new_session_and_renames_cmux_tab
   test_t_uses_tmux_new_session_and_renames_cmux_tab
   test_mux_tab_rejects_control_characters_in_session_name

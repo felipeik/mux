@@ -8,6 +8,8 @@ usage: mux
 
 Commands:
   help, h, -h, --help
+  init [claude|codex] [--scope <user|project|local-project>]
+  uninstall [claude|codex] [--scope <user|project|local-project>]
   join, j [<selector>]
   tab, t <name>
   list, l
@@ -125,7 +127,7 @@ is_internal_mux_command_name() {
   local command_name="${1%% *}"
 
   case "$command_name" in
-    help|h|-h|--help|list|l|save|s|restore|r|cleanup|join|j)
+    help|h|-h|--help|init|uninstall|list|l|save|s|restore|r|cleanup|join|j)
       return 0
       ;;
     *)
@@ -174,6 +176,872 @@ best_effort_save_on_launch() {
   if ! cmd_save >/dev/null; then
     echo "warning: mux save failed during launch" >&2
   fi
+}
+
+claude_settings_path() {
+  printf '%s\n' "${HOME}/.claude/settings.json"
+}
+
+codex_home_path() {
+  if [ -n "${CODEX_HOME:-}" ]; then
+    printf '%s\n' "$CODEX_HOME"
+  else
+    printf '%s\n' "${HOME}/.codex"
+  fi
+}
+
+codex_config_path() {
+  printf '%s/config.toml\n' "$(codex_home_path)"
+}
+
+codex_hooks_path() {
+  printf '%s/hooks.json\n' "$(codex_home_path)"
+}
+
+local_bin_dir() {
+  printf '%s/.local/bin\n' "${HOME}"
+}
+
+current_project_dir() {
+  pwd -P
+}
+
+claude_settings_path_for_scope() {
+  local scope="${1:-user}"
+  local project_dir
+
+  case "$scope" in
+    user)
+      claude_settings_path
+      ;;
+    project)
+      project_dir="$(current_project_dir)"
+      printf '%s/.claude/settings.json\n' "$project_dir"
+      ;;
+    local-project)
+      project_dir="$(current_project_dir)"
+      printf '%s/.claude/settings.local.json\n' "$project_dir"
+      ;;
+    *)
+      printf 'unknown scope: %s\n' "$scope" >&2
+      exit 1
+      ;;
+  esac
+}
+
+codex_scope_supported() {
+  [ "${1:-user}" = "user" ]
+}
+
+mkdir_parent() {
+  mkdir -p "$(dirname "$1")"
+}
+
+ensure_python3() {
+  ensure_command python3
+}
+
+write_file_if_changed() {
+  local path="$1"
+  local temp_file
+
+  mkdir_parent "$path"
+  temp_file="$(mktemp "${TMPDIR:-/tmp}/mux-write.XXXXXX")"
+  cat >"$temp_file"
+  if [ -f "$path" ] && cmp -s "$temp_file" "$path"; then
+    rm -f "$temp_file"
+    return 0
+  fi
+  mv "$temp_file" "$path"
+}
+
+ensure_mux_agent_helper() {
+  local helper_path
+
+  helper_path="$(local_bin_dir)/mux-agent-notify"
+  write_file_if_changed "$helper_path" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+in_cmux() {
+  [ -n "${CMUX_WORKSPACE_ID:-}" ] || [ -n "${CMUX_SURFACE_ID:-}" ] || [ -n "${CMUX_TAB_ID:-}" ]
+}
+
+sanitize_field() {
+  LC_ALL=C printf '%s' "$1" \
+    | tr '\000-\010\013\014\016-\037\177' ' ' \
+    | tr '\r\n' ' ' \
+    | sed 's/;/:/g'
+}
+
+notify_via_tmux() {
+  local title="$1"
+  local body="$2"
+  local payload tty_path
+
+  payload="$(printf '\033Ptmux;\033\033]777;notify;%s;%s\a\033\\' \
+    "$(sanitize_field "$title")" \
+    "$(sanitize_field "$body")")"
+  tty_path="${MUX_AGENT_NOTIFY_TTY_PATH:-}"
+
+  if [ -n "$tty_path" ]; then
+    printf '%s' "$payload" >"$tty_path"
+    return 0
+  fi
+
+  if [ -c /dev/tty ] || [ -e /dev/tty ]; then
+    printf '%s' "$payload" >/dev/tty 2>/dev/null && return 0
+  fi
+
+  if [ -t 1 ]; then
+    printf '%s' "$payload"
+  fi
+}
+
+cmux_socket_available() {
+  local socket="${CMUX_SOCKET_PATH:-}"
+
+  command -v cmux >/dev/null 2>&1 || return 1
+  [ -n "$socket" ] && [ -S "$socket" ] || return 1
+  CMUXTERM_CLI_RESPONSE_TIMEOUT_SEC=0.75 cmux ping >/dev/null 2>&1
+}
+
+notify_via_cmux() {
+  local title="$1"
+  local subtitle="$2"
+  local body="$3"
+
+  if [ -n "$subtitle" ]; then
+    cmux notify --title "$title" --subtitle "$subtitle" --body "$body" >/dev/null 2>&1 || true
+  else
+    cmux notify --title "$title" --body "$body" >/dev/null 2>&1 || true
+  fi
+}
+
+notify() {
+  local title="$1"
+  local subtitle="$2"
+  local body="$3"
+  local tmux_body
+
+  in_cmux || return 0
+
+  if [ -n "${TMUX:-}" ]; then
+    tmux_body="$body"
+    if [ -n "$subtitle" ]; then
+      if [ -n "$tmux_body" ]; then
+        tmux_body="$subtitle: $tmux_body"
+      else
+        tmux_body="$subtitle"
+      fi
+    fi
+    notify_via_tmux "$title" "$tmux_body"
+    return 0
+  fi
+
+  if cmux_socket_available; then
+    notify_via_cmux "$title" "$subtitle" "$body"
+  fi
+}
+
+json_first_string() {
+  local payload="$1"
+  shift
+
+  python3 - "$payload" "$@" <<'PY'
+import json
+import sys
+
+payload = sys.argv[1]
+keys = sys.argv[2:]
+
+def lookup(obj, key_path):
+    cur = obj
+    for part in key_path.split('.'):
+        if not isinstance(cur, dict):
+            return ""
+        cur = cur.get(part)
+    return cur if isinstance(cur, str) else ""
+
+try:
+    data = json.loads(payload) if payload.strip() else {}
+except Exception:
+    data = {}
+
+for key in keys:
+    value = lookup(data, key).strip()
+    if value:
+        print(value)
+        raise SystemExit(0)
+PY
+}
+
+claude_stop_body() {
+  local payload="$1"
+
+  python3 - "$payload" <<'PY'
+import json
+import os
+import sys
+
+payload = sys.argv[1]
+try:
+    data = json.loads(payload) if payload.strip() else {}
+except Exception:
+    data = {}
+
+transcript = data.get("transcript_path") or data.get("transcriptPath") or ""
+cwd = data.get("cwd") or data.get("working_directory") or data.get("workingDirectory") or ""
+
+def assistant_text(message):
+    content = message.get("content")
+    if isinstance(content, str):
+        return content.strip()
+    if isinstance(content, list):
+        pieces = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text = block.get("text")
+                if isinstance(text, str) and text.strip():
+                    pieces.append(text.strip())
+        return " ".join(pieces).strip()
+    return ""
+
+if transcript and os.path.exists(transcript):
+    try:
+        with open(transcript, "r", encoding="utf-8") as fh:
+            last = ""
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entry = json.loads(line)
+                except Exception:
+                    continue
+                message = entry.get("message")
+                if isinstance(message, dict) and message.get("role") == "assistant":
+                    text = assistant_text(message)
+                    if text:
+                        last = text.replace("\n", " ").strip()
+            if last:
+                print(last[:200])
+                raise SystemExit(0)
+    except Exception:
+        pass
+
+if cwd:
+  print(f"Completed in {os.path.basename(cwd.rstrip('/')) or cwd}")
+else:
+  print("Session complete")
+PY
+}
+
+handle_claude_hook() {
+  local subcommand="${1:-help}"
+  local payload message body subtitle lower
+
+  payload="$(cat)"
+
+  case "$subcommand" in
+    notification|notify)
+      message="$(json_first_string "$payload" \
+        message body text prompt error description \
+        notification.message notification.body notification.text notification.prompt \
+        data.message data.body data.text data.prompt)"
+      body="${message:-Claude needs your attention}"
+      subtitle="Attention"
+      lower="$(printf '%s' "$body" | tr '[:upper:]' '[:lower:]')"
+      case "$lower" in
+        *permission*|*approve*|*approval*)
+          subtitle="Permission"
+          ;;
+        *wait*|*input*)
+          subtitle="Waiting"
+          ;;
+        *error*|*failed*)
+          subtitle="Error"
+          ;;
+      esac
+      notify "Claude Code" "$subtitle" "$body"
+      ;;
+    stop|idle)
+      body="$(claude_stop_body "$payload")"
+      notify "Claude Code" "Completed" "$body"
+      ;;
+    session-start|active|session-end|prompt-submit|pre-tool-use|help|-h|--help)
+      ;;
+    *)
+      ;;
+  esac
+}
+
+handle_codex_hook() {
+  local subcommand="${1:-help}"
+  local payload body cwd project
+
+  payload="$(cat)"
+
+  case "$subcommand" in
+    stop)
+      body="$(json_first_string "$payload" \
+        last_assistant_message lastAssistantMessage last-assistant-message \
+        message body text)"
+      cwd="$(json_first_string "$payload" cwd working_directory workingDirectory)"
+      if [ -n "$cwd" ]; then
+        project="$(basename "$cwd")"
+      else
+        project=""
+      fi
+      if [ -z "$body" ]; then
+        body="Codex session completed"
+      fi
+      if [ -n "$project" ]; then
+        notify "Codex" "Completed in $project" "$body"
+      else
+        notify "Codex" "Completed" "$body"
+      fi
+      printf '{}\n'
+      ;;
+    session-start|prompt-submit|help|-h|--help)
+      printf '{}\n'
+      ;;
+    *)
+      printf '{}\n'
+      ;;
+  esac
+}
+
+main() {
+  local mode="${1:-}"
+  shift || true
+
+  case "$mode" in
+    claude-hook)
+      handle_claude_hook "$@"
+      ;;
+    codex-hook)
+      handle_codex_hook "$@"
+      ;;
+    notify)
+      notify "${1:-Notification}" "${2:-}" "${3:-}"
+      ;;
+    *)
+      echo "usage: mux-agent-notify <claude-hook|codex-hook|notify> ..." >&2
+      exit 1
+      ;;
+  esac
+}
+
+main "$@"
+EOF
+  chmod +x "$helper_path"
+  printf '%s\n' "$helper_path"
+}
+
+agent_command_scope="user"
+agent_command_target=""
+agent_command_scope_explicit=0
+
+parse_agent_hook_command_args() {
+  local command_name="$1"
+  shift || true
+
+  agent_command_scope="user"
+  agent_command_target=""
+  agent_command_scope_explicit=0
+
+  while [ "$#" -gt 0 ]; do
+    case "$1" in
+      --scope)
+        if [ "$#" -lt 2 ]; then
+          echo "missing value for --scope" >&2
+          exit 1
+        fi
+        agent_command_scope="$2"
+        agent_command_scope_explicit=1
+        shift 2
+        ;;
+      --scope=*)
+        agent_command_scope="${1#--scope=}"
+        agent_command_scope_explicit=1
+        shift
+        ;;
+      claude|codex)
+        if [ -n "$agent_command_target" ]; then
+          echo "mux $command_name accepts at most one target" >&2
+          exit 1
+        fi
+        agent_command_target="$1"
+        shift
+        ;;
+      *)
+        echo "unknown mux $command_name argument: $1" >&2
+        exit 1
+        ;;
+    esac
+  done
+
+  case "$agent_command_scope" in
+    user|project|local-project)
+      ;;
+    *)
+      echo "unknown --scope value: $agent_command_scope" >&2
+      exit 1
+      ;;
+  esac
+}
+
+print_install_result() {
+  local label="$1"
+  local scope="$2"
+  local main_path="$3"
+  shift 3
+
+  printf '%s\n' "$label"
+  printf 'scope: %s\n' "$scope"
+  printf 'path: %s\n' "$main_path"
+  while [ "$#" -gt 0 ]; do
+    printf 'path: %s\n' "$1"
+    shift
+  done
+}
+
+helper_reference_exists() {
+  local helper_path="$1"
+  local path
+
+  for path in \
+    "${HOME}/.claude/settings.json" \
+    "${HOME}/.codex/hooks.json" \
+    "$(current_project_dir)/.claude/settings.json" \
+    "$(current_project_dir)/.claude/settings.local.json"
+  do
+    if [ -f "$path" ] && rg -Fq "$helper_path" "$path"; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
+cleanup_mux_agent_helper_if_unused() {
+  local helper_path="$1"
+
+  if [ ! -f "$helper_path" ]; then
+    return 0
+  fi
+
+  if helper_reference_exists "$helper_path"; then
+    return 0
+  fi
+
+  rm -f "$helper_path"
+}
+
+install_claude_hooks() {
+  local scope="$1"
+  local helper_path settings_path
+
+  if ! command -v claude >/dev/null 2>&1; then
+    printf 'skipping claude: not installed\n'
+    return 0
+  fi
+
+  ensure_python3
+  helper_path="$(ensure_mux_agent_helper)"
+  settings_path="$(claude_settings_path_for_scope "$scope")"
+  mkdir_parent "$settings_path"
+
+  python3 - "$settings_path" "$helper_path" <<'PY'
+import json
+import pathlib
+import sys
+
+settings_path = pathlib.Path(sys.argv[1])
+helper_path = sys.argv[2]
+
+if settings_path.exists():
+    with settings_path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+
+hooks = data.setdefault("hooks", {})
+
+def ensure_event(event, matcher, hook_obj):
+    groups = hooks.setdefault(event, [])
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        if group.get("matcher", "") != matcher:
+            continue
+        group_hooks = group.setdefault("hooks", [])
+        if hook_obj not in group_hooks:
+            group_hooks.append(hook_obj)
+        return
+    groups.append({"matcher": matcher, "hooks": [hook_obj]})
+
+base = f"{helper_path} claude-hook"
+ensure_event("Notification", "", {"type": "command", "command": f"{base} notification", "timeout": 10})
+ensure_event("Stop", "", {"type": "command", "command": f"{base} stop", "timeout": 10})
+ensure_event("SessionStart", "", {"type": "command", "command": f"{base} session-start", "timeout": 10})
+ensure_event("SessionEnd", "", {"type": "command", "command": f"{base} session-end", "timeout": 1})
+ensure_event("UserPromptSubmit", "", {"type": "command", "command": f"{base} prompt-submit", "timeout": 10})
+ensure_event("PreToolUse", "", {"type": "command", "command": f"{base} pre-tool-use", "timeout": 5, "async": True})
+
+settings_path.parent.mkdir(parents=True, exist_ok=True)
+with settings_path.open("w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+PY
+
+  print_install_result "installed claude hooks" "$scope" "$settings_path" "$helper_path"
+}
+
+uninstall_claude_hooks() {
+  local scope="$1"
+  local helper_path settings_path
+
+  helper_path="$(local_bin_dir)/mux-agent-notify"
+  settings_path="$(claude_settings_path_for_scope "$scope")"
+
+  if [ ! -f "$settings_path" ]; then
+    printf 'skipping claude uninstall: no config at %s\n' "$settings_path"
+    cleanup_mux_agent_helper_if_unused "$helper_path"
+    return 0
+  fi
+
+  python3 - "$settings_path" "$helper_path" <<'PY'
+import json
+import pathlib
+import sys
+
+settings_path = pathlib.Path(sys.argv[1])
+helper_path = sys.argv[2]
+marker = f"{helper_path} claude-hook "
+
+with settings_path.open("r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+if not isinstance(data, dict):
+    data = {}
+
+hooks = data.get("hooks")
+if isinstance(hooks, dict):
+    cleaned = {}
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            group_hooks = group.get("hooks")
+            if not isinstance(group_hooks, list):
+                kept_groups.append(group)
+                continue
+            kept_hooks = []
+            for hook in group_hooks:
+                command = hook.get("command", "") if isinstance(hook, dict) else ""
+                if isinstance(command, str) and marker in command:
+                    continue
+                kept_hooks.append(hook)
+            if kept_hooks:
+                new_group = dict(group)
+                new_group["hooks"] = kept_hooks
+                kept_groups.append(new_group)
+        if kept_groups:
+            cleaned[event] = kept_groups
+    if cleaned:
+        data["hooks"] = cleaned
+    elif "hooks" in data:
+        del data["hooks"]
+
+with settings_path.open("w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2)
+    fh.write("\n")
+PY
+
+  cleanup_mux_agent_helper_if_unused "$helper_path"
+  print_install_result "removed claude hooks" "$scope" "$settings_path" "$helper_path"
+}
+
+uninstall_claude_hooks_default_scopes() {
+  local helper_path
+
+  helper_path="$(local_bin_dir)/mux-agent-notify"
+  uninstall_claude_hooks "user"
+  uninstall_claude_hooks "project"
+  uninstall_claude_hooks "local-project"
+  cleanup_mux_agent_helper_if_unused "$helper_path"
+}
+
+install_codex_hooks() {
+  local scope="$1"
+  local helper_path config_path hooks_path codex_home
+
+  if ! codex_scope_supported "$scope"; then
+    printf 'codex only supports --scope user\n' >&2
+    exit 1
+  fi
+
+  if ! command -v codex >/dev/null 2>&1; then
+    printf 'skipping codex: not installed\n'
+    return 0
+  fi
+
+  ensure_python3
+  helper_path="$(ensure_mux_agent_helper)"
+  codex_home="$(codex_home_path)"
+  config_path="$(codex_config_path)"
+  hooks_path="$(codex_hooks_path)"
+  mkdir -p "$codex_home"
+
+  python3 - "$config_path" "$hooks_path" "$helper_path" <<'PY'
+import json
+import pathlib
+import sys
+
+config_path = pathlib.Path(sys.argv[1])
+hooks_path = pathlib.Path(sys.argv[2])
+helper_path = sys.argv[3]
+
+if hooks_path.exists():
+    with hooks_path.open("r", encoding="utf-8") as fh:
+        data = json.load(fh)
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    data = {}
+
+root_hooks = data.setdefault("hooks", {})
+base = f"{helper_path} codex-hook"
+
+cmux_groups = {
+    "SessionStart": [{"hooks": [{"type": "command", "command": f"{base} session-start", "timeout": 10}]}],
+    "UserPromptSubmit": [{"hooks": [{"type": "command", "command": f"{base} prompt-submit", "timeout": 10}]}],
+    "Stop": [{"hooks": [{"type": "command", "command": f"{base} stop", "timeout": 10}]}],
+}
+
+for event, groups in cmux_groups.items():
+    existing = root_hooks.setdefault(event, [])
+    marker = f"{base} "
+    filtered = []
+    for group in existing:
+        group_hooks = group.get("hooks") if isinstance(group, dict) else None
+        if isinstance(group_hooks, list) and group_hooks and all(marker in str(hook.get("command", "")) for hook in group_hooks if isinstance(hook, dict)):
+            continue
+        filtered.append(group)
+    filtered.extend(groups)
+    root_hooks[event] = filtered
+
+hooks_path.parent.mkdir(parents=True, exist_ok=True)
+with hooks_path.open("w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+
+if config_path.exists():
+    text = config_path.read_text(encoding="utf-8")
+else:
+    text = ""
+
+lines = text.splitlines()
+features_start = None
+features_end = len(lines)
+for idx, line in enumerate(lines):
+    stripped = line.strip()
+    if stripped == "[features]":
+        features_start = idx
+        for inner in range(idx + 1, len(lines)):
+            inner_stripped = lines[inner].strip()
+            if inner_stripped.startswith("[") and inner_stripped.endswith("]"):
+                features_end = inner
+                break
+        break
+
+if features_start is None:
+    if lines and lines[-1] != "":
+        lines.append("")
+    lines.extend(["[features]", "codex_hooks = true"])
+else:
+    replaced = False
+    for idx in range(features_start + 1, features_end):
+        if lines[idx].strip().startswith("codex_hooks"):
+            lines[idx] = "codex_hooks = true"
+            replaced = True
+            break
+    if not replaced:
+        lines.insert(features_end, "codex_hooks = true")
+
+config_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+PY
+
+  print_install_result "installed codex hooks" "$scope" "$hooks_path" "$config_path" "$helper_path"
+}
+
+uninstall_codex_hooks() {
+  local scope="$1"
+  local helper_path config_path hooks_path
+
+  if ! codex_scope_supported "$scope"; then
+    printf 'codex only supports --scope user\n' >&2
+    exit 1
+  fi
+
+  helper_path="$(local_bin_dir)/mux-agent-notify"
+  config_path="$(codex_config_path)"
+  hooks_path="$(codex_hooks_path)"
+
+  if [ -f "$hooks_path" ]; then
+    python3 - "$hooks_path" "$config_path" "$helper_path" <<'PY'
+import json
+import pathlib
+import sys
+
+hooks_path = pathlib.Path(sys.argv[1])
+config_path = pathlib.Path(sys.argv[2])
+helper_path = sys.argv[3]
+marker = f"{helper_path} codex-hook "
+
+with hooks_path.open("r", encoding="utf-8") as fh:
+    data = json.load(fh)
+
+if not isinstance(data, dict):
+    data = {}
+
+hooks = data.get("hooks")
+if isinstance(hooks, dict):
+    cleaned = {}
+    for event, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict):
+                continue
+            group_hooks = group.get("hooks")
+            if not isinstance(group_hooks, list):
+                kept_groups.append(group)
+                continue
+            kept_hooks = []
+            for hook in group_hooks:
+                command = hook.get("command", "") if isinstance(hook, dict) else ""
+                if isinstance(command, str) and marker in command:
+                    continue
+                kept_hooks.append(hook)
+            if kept_hooks:
+                new_group = dict(group)
+                new_group["hooks"] = kept_hooks
+                kept_groups.append(new_group)
+        if kept_groups:
+            cleaned[event] = kept_groups
+    if cleaned:
+        data["hooks"] = cleaned
+    elif "hooks" in data:
+        del data["hooks"]
+
+with hooks_path.open("w", encoding="utf-8") as fh:
+    json.dump(data, fh, indent=2, sort_keys=True)
+    fh.write("\n")
+
+remaining_hooks = data.get("hooks")
+disable_feature = not isinstance(remaining_hooks, dict) or not any(remaining_hooks.values())
+
+if config_path.exists() and disable_feature:
+    lines = config_path.read_text(encoding="utf-8").splitlines()
+    features_start = None
+    features_end = len(lines)
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if stripped == "[features]":
+            features_start = idx
+            for inner in range(idx + 1, len(lines)):
+                inner_stripped = lines[inner].strip()
+                if inner_stripped.startswith("[") and inner_stripped.endswith("]"):
+                    features_end = inner
+                    break
+            break
+
+    if features_start is not None:
+        filtered = []
+        for idx, line in enumerate(lines):
+            if features_start < idx < features_end and line.strip().startswith("codex_hooks"):
+                continue
+            filtered.append(line)
+        if features_start < len(filtered):
+            tail_idx = None
+            for idx in range(features_start + 1, len(filtered)):
+                stripped = filtered[idx].strip()
+                if stripped.startswith("[") and stripped.endswith("]"):
+                    tail_idx = idx
+                    break
+            if tail_idx is None:
+                tail_idx = len(filtered)
+            if not any(filtered[idx].strip() and not filtered[idx].strip().startswith("#") for idx in range(features_start + 1, tail_idx)):
+                del filtered[features_start:tail_idx]
+                while filtered and filtered[-1] == "":
+                    filtered.pop()
+        config_path.write_text("\n".join(filtered).rstrip() + "\n", encoding="utf-8")
+PY
+  fi
+
+  cleanup_mux_agent_helper_if_unused "$helper_path"
+  print_install_result "removed codex hooks" "$scope" "$hooks_path" "$config_path" "$helper_path"
+}
+
+cmd_init() {
+  parse_agent_hook_command_args "init" "$@"
+
+  case "$agent_command_target" in
+    "")
+      install_claude_hooks "$agent_command_scope"
+      if codex_scope_supported "$agent_command_scope"; then
+        install_codex_hooks "$agent_command_scope"
+      else
+        printf 'skipping codex: only --scope user is supported\n'
+      fi
+      ;;
+    claude)
+      install_claude_hooks "$agent_command_scope"
+      ;;
+    codex)
+      install_codex_hooks "$agent_command_scope"
+      ;;
+  esac
+}
+
+cmd_uninstall() {
+  parse_agent_hook_command_args "uninstall" "$@"
+
+  case "$agent_command_target" in
+    "")
+      if [ "$agent_command_scope_explicit" -eq 1 ]; then
+        uninstall_claude_hooks "$agent_command_scope"
+      else
+        uninstall_claude_hooks_default_scopes
+      fi
+      if codex_scope_supported "$agent_command_scope"; then
+        uninstall_codex_hooks "$agent_command_scope"
+      else
+        printf 'skipping codex uninstall: only --scope user is supported\n'
+      fi
+      ;;
+    claude)
+      if [ "$agent_command_scope_explicit" -eq 1 ]; then
+        uninstall_claude_hooks "$agent_command_scope"
+      else
+        uninstall_claude_hooks_default_scopes
+      fi
+      ;;
+    codex)
+      uninstall_codex_hooks "$agent_command_scope"
+      ;;
+  esac
 }
 
 open_session() {
@@ -684,6 +1552,14 @@ main() {
   case "${1:-}" in
     ""|-h|--help|help|h)
       usage
+      ;;
+    init)
+      shift
+      cmd_init "$@"
+      ;;
+    uninstall)
+      shift
+      cmd_uninstall "$@"
       ;;
     tab)
       shift

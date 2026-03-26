@@ -23,6 +23,8 @@ This project was fully vibe-coded. Read the script, use it if it fits your workf
 
 Without `cmux`, `mux tab` still opens tmux sessions, and `mux list` / `mux join` can fall back to the saved state file for mux-managed entries.
 
+`mux init` configures Claude Code and Codex hooks so those CLIs can notify `cmux` from plain `cmux` shells and from `tmux` running inside `cmux`. `mux uninstall` removes the hook entries that `mux` added.
+
 ## Installation
 
 There is no Homebrew package right now.
@@ -66,6 +68,52 @@ Then make sure `~/.local/bin` is in your `PATH` and run:
 ```bash
 mux --help
 ```
+
+## Global agent hooks
+
+Install the supported global hooks:
+
+```bash
+mux init
+```
+
+Install only one integration:
+
+```bash
+mux init claude
+mux init codex
+```
+
+Choose a scope for Claude:
+
+```bash
+mux init claude --scope project
+mux init claude --scope local-project
+```
+
+Remove hooks again:
+
+```bash
+mux uninstall
+mux uninstall claude
+mux uninstall codex
+mux uninstall claude --scope project
+```
+
+Behavior:
+
+- `mux init claude` defaults to user scope and merges hooks into `~/.claude/settings.json`.
+- `mux init claude --scope project` writes to `.claude/settings.json` in the current project.
+- `mux init claude --scope local-project` writes to `.claude/settings.local.json` in the current project.
+- `mux init codex` writes `~/.codex/hooks.json` and enables `codex_hooks = true` in `~/.codex/config.toml`.
+- `mux uninstall claude` removes `mux`-managed Claude hooks from all three Claude scopes: `~/.claude/settings.json`, `.claude/settings.json`, and `.claude/settings.local.json`.
+- `mux uninstall claude --scope ...` removes Claude hooks only from the selected scope.
+- `Codex` currently supports `--scope user` only.
+- Missing apps are skipped instead of causing the command to fail.
+- The installed helper lives at `~/.local/bin/mux-agent-notify`.
+- Inside plain `cmux`, the helper uses `cmux notify`.
+- Inside `tmux` within `cmux`, the helper uses `tmux` OSC passthrough so notifications still reach `cmux`.
+- `mux init` and `mux uninstall` print the paths they touched so you can see exactly where the hooks were created or removed.
 
 ## Typical workflow
 
@@ -120,6 +168,24 @@ If you SSH into the same machine from your phone or iPad, `mux list` plus `mux j
 
 - `mux`, `mux help`, `mux h`, `mux -h`, `mux --help`
   Print usage.
+- `mux init`
+  Install the supported global Claude Code and Codex notification hooks, skipping any app that is not installed.
+- `mux init claude`
+  Merge the Claude Code notification hooks into `~/.claude/settings.json`.
+- `mux init claude --scope project`
+  Merge the Claude Code notification hooks into `.claude/settings.json` in the current project.
+- `mux init claude --scope local-project`
+  Merge the Claude Code notification hooks into `.claude/settings.local.json` in the current project.
+- `mux init codex`
+  Install Codex hooks into `~/.codex/hooks.json` and enable `codex_hooks` in `~/.codex/config.toml`.
+- `mux uninstall`
+  Remove the `mux`-managed Claude Code hooks from all Claude scopes in the current project context, and remove the `mux`-managed Codex hooks from the user scope.
+- `mux uninstall claude`
+  Remove the `mux`-managed Claude Code hook entries from all Claude scopes in the current project context.
+- `mux uninstall claude --scope project`
+  Remove the `mux`-managed Claude Code hook entries only from `.claude/settings.json` in the current project.
+- `mux uninstall codex`
+  Remove the `mux`-managed Codex hook entries from `~/.codex/hooks.json` and disable `codex_hooks` when no hooks remain.
 - `mux tab <name>` and `mux t <name>`
   Create or attach to a literal tmux session with `tmux new-session -A -s <name>`, rename the current `cmux` tab to `mux <name>`, and best-effort refresh the saved tab-to-session snapshot first when `cmux` and `jq` are available.
 - `mux list` and `mux l`
@@ -145,6 +211,8 @@ If you SSH into the same machine from your phone or iPad, `mux list` plus `mux j
 - `mux join` only accepts selectors from the current list. It does not fall back to treating the argument as a literal tmux session name.
 - Bare commands like `mux 1` or `mux backend` are invalid on purpose. Use `mux join <selector>` or `mux tab <name>`.
 - `mux tab <name>` rejects session names that contain terminal control characters.
+- `mux init` writes user-level config under `~/.claude/`, `~/.codex/`, and `~/.local/bin/`; it merges supported hook entries instead of replacing unrelated settings.
+- `mux init` and `mux uninstall` only add or remove `mux-agent-notify` hook entries. They keep unrelated hook settings intact.
 - Names printed by `mux` are sanitized before they are written to the terminal.
 - `mux restore` uses `cmux respawn-pane`, so it is aimed at `cmux` layouts that still exist but lost the terminal process behind them.
 - `mux` does not replace `cmux`'s own layout handling. It only remembers which tmux session belonged to which saved mux-managed terminal.
