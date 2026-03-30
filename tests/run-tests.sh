@@ -1871,6 +1871,65 @@ EOF
   fi
 }
 
+test_mux_list_falls_back_to_saved_state_when_cmux_tree_fails() {
+  local temp_dir stub_dir state_file output jq_bin
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  state_file="$temp_dir/state.json"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  cat >"$state_file" <<'EOF'
+{
+  "version": 1,
+  "workspaces": [
+    {
+      "title": "Alpha",
+      "entries": [
+        {
+          "title": "mux backend",
+          "session": "backend",
+          "pane_index": 0,
+          "surface_index_in_pane": 0
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/cmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "tree" ] && [ "$2" = "--all" ] && [ "$3" = "--json" ]; then
+  echo "Error: Failed to write to socket" >&2
+  exit 1
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  write_executable "$stub_dir/tmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "list-sessions" ] && [ "$2" = "-F" ]; then
+  exit 0
+fi
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" list 2>&1 || true)"
+
+  assert_contains "1  a    Alpha      backend" "$output" "expected mux list to fall back to saved state when cmux tree fails"
+  case "$output" in
+    *"Failed to write to socket"*)
+      fail "expected mux list to suppress raw cmux socket errors when falling back to saved state"
+      ;;
+  esac
+}
+
 test_save_and_s_rewrite_state_with_only_canonical_mux_tabs() {
   local temp_dir stub_dir state_file tree_json
   temp_dir="$(make_temp_dir)"
@@ -1990,6 +2049,77 @@ EOF
   assert_json_filter_equals "$state_file" '.workspaces[0].entries[0].pane_index' "0"
   assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].title' "mux backend"
   assert_json_filter_equals "$state_file" '.workspaces[1].entries[0].session' "backend"
+}
+
+test_mux_save_preserves_existing_state_when_cmux_tree_is_empty() {
+  local temp_dir stub_dir state_file output before_contents jq_bin
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  state_file="$temp_dir/state.json"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  cat >"$state_file" <<'EOF'
+{
+  "version": 1,
+  "workspaces": [
+    {
+      "title": "Alpha",
+      "entries": [
+        {
+          "title": "mux backend",
+          "session": "backend",
+          "pane_index": 0,
+          "surface_index_in_pane": 0
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  before_contents="$(cat "$state_file")"
+
+  write_executable "$stub_dir/cmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "tree" ] && [ "$2" = "--all" ] && [ "$3" = "--json" ]; then
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  output="$(PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" save 2>&1 || true)"
+
+  assert_contains "cmux tree unavailable" "$output" "expected mux save to reject empty cmux tree output"
+  assert_eq "$before_contents" "$(cat "$state_file")" "expected mux save to preserve the existing state file when cmux tree output is empty"
+}
+
+test_mux_restore_rejects_empty_state_file() {
+  local temp_dir stub_dir state_file output
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  state_file="$temp_dir/state.json"
+  mkdir -p "$stub_dir"
+  : >"$state_file"
+
+  write_executable "$stub_dir/cmux" <<'EOF'
+#!/usr/bin/env bash
+if [ "$1" = "tree" ] && [ "$2" = "--all" ] && [ "$3" = "--json" ]; then
+  printf '{"windows":[]}'
+  exit 0
+fi
+exit 0
+EOF
+
+  output="$(PATH="$stub_dir:$PATH" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" restore 2>&1 || true)"
+
+  assert_contains "invalid or empty state file" "$output" "expected mux restore to reject empty snapshots"
+  assert_contains "run: mux save" "$output" "expected mux restore to recommend re-saving after an empty snapshot"
 }
 
 test_restore_respawns_matching_saved_canonical_mux_tabs_best_effort() {
@@ -2511,7 +2641,10 @@ main() {
   test_mux_invalid_numeric_selection_does_not_launch_tmux_from_list_stdin
   test_mux_unknown_selectors_error_without_launching_sessions
   test_mux_list_and_invalid_selector_work_without_cmux_using_saved_state
+  test_mux_list_falls_back_to_saved_state_when_cmux_tree_fails
   test_save_and_s_rewrite_state_with_only_canonical_mux_tabs
+  test_mux_save_preserves_existing_state_when_cmux_tree_is_empty
+  test_mux_restore_rejects_empty_state_file
   test_restore_respawns_matching_saved_canonical_mux_tabs_best_effort
   test_mux_cleanup_requires_cmux
   test_mux_cleanup_lists_orphans_and_skips_deletion_without_exact_yes

@@ -21,7 +21,7 @@ This project was fully vibe-coded. Read the script, use it if it fits your workf
 - `jq`
 - `cmux` for full tab-to-session snapshot and restore integration
 
-Without `cmux`, `mux tab` still opens tmux sessions, and `mux list` / `mux join` can fall back to the saved state file for mux-managed entries.
+Without a usable live `cmux` tree, `mux tab` still opens tmux sessions, and `mux list` / `mux join` can fall back to the saved state file for mux-managed entries.
 
 `mux init` configures Claude Code and Codex hooks so those CLIs can notify `cmux` from plain `cmux` shells and from `tmux` running inside `cmux`. `mux uninstall` removes the hook entries that `mux` added.
 
@@ -215,6 +215,8 @@ If you SSH into the same machine from your phone or iPad, `mux list` plus `mux j
 - `mux init` and `mux uninstall` only add or remove `mux-agent-notify` hook entries. They keep unrelated hook settings intact.
 - Names printed by `mux` are sanitized before they are written to the terminal.
 - `mux restore` uses `cmux respawn-pane`, so it is aimed at `cmux` layouts that still exist but lost the terminal process behind them.
+- `mux save` refuses to overwrite the saved snapshot when `cmux tree --all --json` is unavailable or empty.
+- `mux restore` requires both a reachable live `cmux` tree and a non-empty saved snapshot file.
 - `mux` does not replace `cmux`'s own layout handling. It only remembers which tmux session belonged to which saved mux-managed terminal.
 - `mux cleanup` can kill tmux sessions. Read the list before approving it.
 

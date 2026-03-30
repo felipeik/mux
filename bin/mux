@@ -539,6 +539,50 @@ EOF
   printf '%s\n' "$helper_path"
 }
 
+json_payload_present() {
+  local payload="$1"
+
+  [ -n "$(printf '%s' "$payload" | tr -d '[:space:]')" ]
+}
+
+load_cmux_tree_json() {
+  local tree_json
+
+  if ! tree_json="$(cmux tree --all --json 2>/dev/null)"; then
+    return 1
+  fi
+
+  json_payload_present "$tree_json" || return 1
+  printf '%s\n' "$tree_json"
+}
+
+require_cmux_tree_json() {
+  local tree_json
+
+  if ! tree_json="$(load_cmux_tree_json)"; then
+    echo "cmux tree unavailable; ensure cmux is running and the socket is reachable" >&2
+    exit 1
+  fi
+
+  printf '%s\n' "$tree_json"
+}
+
+require_valid_state_file() {
+  local state_file="$1"
+
+  if [ ! -f "$state_file" ]; then
+    echo "missing state file: $state_file" >&2
+    echo "run: mux save" >&2
+    exit 1
+  fi
+
+  if [ ! -s "$state_file" ]; then
+    echo "invalid or empty state file: $state_file" >&2
+    echo "run: mux save" >&2
+    exit 1
+  fi
+}
+
 agent_command_scope="user"
 agent_command_target=""
 agent_command_scope_explicit=0
@@ -1112,11 +1156,12 @@ live_mux_entries() {
   ensure_command jq
 
   if command -v cmux >/dev/null 2>&1; then
-    tree_json="$(cmux tree --all --json)"
-    entries="$(printf '%s\n' "$tree_json" | raw_cmux_mux_entries)"
-    current_surface_ref="$(printf '%s\n' "$tree_json" | cmux_caller_surface_ref)"
-    filter_transient_current_surface_entry "$entries" "$current_surface_ref"
-    return
+    if tree_json="$(load_cmux_tree_json)"; then
+      entries="$(printf '%s\n' "$tree_json" | raw_cmux_mux_entries)"
+      current_surface_ref="$(printf '%s\n' "$tree_json" | cmux_caller_surface_ref)"
+      filter_transient_current_surface_entry "$entries" "$current_surface_ref"
+      return
+    fi
   fi
 
   state_file="$(state_file_path)"
@@ -1367,7 +1412,7 @@ cmd_join() {
 }
 
 cmd_save() {
-  local state_file temp_file
+  local state_file temp_file tree_json
 
   ensure_command cmux
   ensure_command jq
@@ -1375,8 +1420,9 @@ cmd_save() {
   state_file="$(state_file_path)"
   mkdir -p "$(dirname "$state_file")"
   temp_file="$(mktemp "${TMPDIR:-/tmp}/mux-state.XXXXXX")"
+  tree_json="$(require_cmux_tree_json)"
 
-  cmux tree --all --json | jq '
+  printf '%s\n' "$tree_json" | jq '
     {
       version: 1,
       workspaces: [
@@ -1415,13 +1461,9 @@ cmd_restore() {
   ensure_command jq
 
   state_file="$(state_file_path)"
-  if [ ! -f "$state_file" ]; then
-    echo "missing state file: $state_file" >&2
-    echo "run: mux save" >&2
-    exit 1
-  fi
+  require_valid_state_file "$state_file"
 
-  current_tree="$(cmux tree --all --json)"
+  current_tree="$(require_cmux_tree_json)"
   self_path="$(script_path)"
 
   while IFS= read -r workspace_json; do
