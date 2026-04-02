@@ -29,6 +29,18 @@ If you need to route notifications from a Docker sandbox back into `cmux`, see
 [`docs/sandbox-cmux-notifications.md`](docs/sandbox-cmux-notifications.md) for
 the reusable pattern, topology guidance, and failure modes.
 
+To scaffold a bare-bones Claude Docker sandbox into another project, use:
+
+```bash
+bin/install-claude-sandbox /path/to/project
+```
+
+The installer creates a minimal `sandbox/` plus project-local Claude hooks. It
+supports `cmux > sandbox` and `cmux > tmux > sandbox` notification delivery,
+includes a host-backed `bd` shim, supports optional extra read-only mounts from
+`sandbox/.env`, supports optional extra allowed host ports from `sandbox/.env`,
+and does not add broader host command shims such as `git` or `swift`.
+
 ## Installation
 
 There is no Homebrew package right now.

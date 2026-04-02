@@ -533,6 +533,65 @@ test_mux_init_all_skips_missing_apps() {
   fi
 }
 
+test_install_claude_sandbox_allows_configured_host_ports() {
+  local temp_dir project_dir home_dir stub_dir docker_log output sandbox_name sandbox_script env_file
+  temp_dir="$(make_temp_dir)"
+  project_dir="$temp_dir/project"
+  home_dir="$temp_dir/home"
+  stub_dir="$temp_dir/bin"
+  docker_log="$temp_dir/docker.log"
+  mkdir -p "$project_dir" "$home_dir/.claude" "$stub_dir"
+
+  "$ROOT_DIR/bin/install-claude-sandbox" "$project_dir" >/dev/null
+
+  sandbox_script="$project_dir/sandbox/sandbox.sh"
+  env_file="$project_dir/sandbox/.env"
+  sandbox_name="claude-project"
+
+  cat >"$env_file" <<'EOF'
+SANDBOX_PROXY_PORT=9007
+SANDBOX_ALLOWED_HOST_PORTS=5433,6380
+EOF
+
+  write_executable "$stub_dir/docker" <<EOF
+#!/usr/bin/env bash
+printf '%s\n' "\$*" >>"$docker_log"
+if [ "\$1" = "sandbox" ] && [ "\$2" = "version" ]; then
+  exit 0
+fi
+if [ "\$1" = "sandbox" ] && [ "\$2" = "ls" ]; then
+  printf 'NAME STATUS WORKSPACE\n'
+  exit 0
+fi
+if [ "\$1" = "image" ] && [ "\$2" = "inspect" ]; then
+  exit 0
+fi
+if [ "\$1" = "sandbox" ] && [ "\$2" = "run" ]; then
+  exit 0
+fi
+if [ "\$1" = "sandbox" ] && [ "\$2" = "network" ] && [ "\$3" = "proxy" ]; then
+  exit 0
+fi
+exit 0
+EOF
+
+  write_executable "$stub_dir/curl" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  write_executable "$stub_dir/sleep" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  output="$(HOME="$home_dir" PATH="$stub_dir:/usr/bin:/bin" "$sandbox_script" run 2>&1 || true)"
+
+  assert_contains "Proxy reachable on :9007" "$output" "expected generated sandbox to accept the configured proxy port"
+  assert_file_exists "$docker_log"
+  assert_contains "sandbox network proxy $sandbox_name --allow-host localhost:9007 --allow-host localhost:5433 --allow-host localhost:6380" "$(cat "$docker_log")" "expected generated sandbox to allow each configured host port"
+}
+
 test_tab_uses_tmux_new_session_and_renames_cmux_tab() {
   local temp_dir stub_dir log_file
   temp_dir="$(make_temp_dir)"
@@ -2618,6 +2677,7 @@ main() {
   test_mux_uninstall_codex_removes_only_mux_hooks_and_feature_flag
   test_mux_init_codex_rejects_project_scope
   test_mux_init_all_skips_missing_apps
+  test_install_claude_sandbox_allows_configured_host_ports
   test_tab_uses_tmux_new_session_and_renames_cmux_tab
   test_t_uses_tmux_new_session_and_renames_cmux_tab
   test_mux_tab_rejects_control_characters_in_session_name

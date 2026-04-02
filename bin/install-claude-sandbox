@@ -1,0 +1,1002 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage: install-claude-sandbox <target-project-dir>
+
+Install a bare-bones Claude Docker sandbox into an existing project.
+
+What it creates:
+  - sandbox/Dockerfile
+  - sandbox/host-proxy.py
+  - sandbox/sandbox.sh
+  - sandbox/.env.example
+  - sandbox/shims/host-shim
+  - sandbox/claude-cmux-notify.py
+  - sandbox/claude_cmux.py
+  - sandbox/README.md
+  - .claude/hooks/sandbox-cmux-notify.sh
+  - Notification/Stop hook entries in .claude/settings.json
+  - sandbox/.runtime/ ignore rule in .gitignore
+
+The installed sandbox supports:
+  - ./sandbox/sandbox.sh init
+  - ./sandbox/sandbox.sh proxy
+  - ./sandbox/sandbox.sh run
+  - ./sandbox/sandbox.sh run --workspace path/inside/project
+
+The installed sandbox includes:
+  - CMUX notification delivery
+  - a generic `bd` host shim inside the sandbox
+  - optional extra allowed host ports via sandbox/.env
+  - optional extra read-only mounts via sandbox/.env
+
+It intentionally does NOT install broader host command shims such as git or swift.
+EOF
+}
+
+log() {
+  printf '[install-claude-sandbox] %s\n' "$*"
+}
+
+err() {
+  printf '[install-claude-sandbox] %s\n' "$*" >&2
+}
+
+if [ $# -ne 1 ]; then
+  usage >&2
+  exit 1
+fi
+
+TARGET_ROOT="$1"
+if [ ! -d "$TARGET_ROOT" ]; then
+  err "Target directory not found: $TARGET_ROOT"
+  exit 1
+fi
+
+TARGET_ROOT="$(cd "$TARGET_ROOT" && pwd)"
+HOST_USER="$(basename "$HOME")"
+
+mkdir -p "$TARGET_ROOT/sandbox" "$TARGET_ROOT/sandbox/shims" "$TARGET_ROOT/.claude/hooks"
+
+ensure_ignore_line() {
+  local line="$1"
+  if [ -f "$TARGET_ROOT/.gitignore" ]; then
+    if ! grep -qx "$line" "$TARGET_ROOT/.gitignore"; then
+      printf '\n%s\n' "$line" >>"$TARGET_ROOT/.gitignore"
+    fi
+  else
+    printf '%s\n' "$line" >"$TARGET_ROOT/.gitignore"
+  fi
+}
+
+ensure_ignore_line 'sandbox/.runtime/'
+ensure_ignore_line 'sandbox/.env'
+
+python3 - "$TARGET_ROOT/.claude/settings.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+if path.exists():
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError as exc:
+        raise SystemExit(f"existing {path} is not valid JSON: {exc}")
+else:
+    data = {}
+
+if not isinstance(data, dict):
+    raise SystemExit(f"existing {path} must contain a JSON object")
+
+hooks = data.setdefault("hooks", {})
+if not isinstance(hooks, dict):
+    raise SystemExit(f"existing {path} has a non-object hooks field")
+
+def ensure(event: str, command: str, timeout: int = 10) -> None:
+    groups = hooks.setdefault(event, [])
+    if not isinstance(groups, list):
+        raise SystemExit(f"existing {path} has a non-list hooks.{event} field")
+
+    for group in groups:
+        if not isinstance(group, dict):
+            continue
+        if group.get("matcher", "") != "":
+            continue
+        group_hooks = group.setdefault("hooks", [])
+        if not isinstance(group_hooks, list):
+            raise SystemExit(f"existing {path} has a non-list hooks.{event}[*].hooks field")
+        for hook in group_hooks:
+            if isinstance(hook, dict) and hook.get("command") == command:
+                return
+        group_hooks.append({"type": "command", "command": command, "timeout": timeout})
+        return
+
+    groups.append(
+        {
+            "matcher": "",
+            "hooks": [{"type": "command", "command": command, "timeout": timeout}],
+        }
+    )
+
+ensure("Notification", "bash .claude/hooks/sandbox-cmux-notify.sh notification")
+ensure("Stop", "bash .claude/hooks/sandbox-cmux-notify.sh stop")
+
+path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+PY
+
+cat >"$TARGET_ROOT/.claude/hooks/sandbox-cmux-notify.sh" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+command -v python3 >/dev/null 2>&1 || exit 0
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+payload="$(cat)"
+
+printf '%s' "$payload" | python3 "$repo_root/sandbox/claude-cmux-notify.py" "${1:-notification}"
+EOF
+chmod +x "$TARGET_ROOT/.claude/hooks/sandbox-cmux-notify.sh"
+
+cat >"$TARGET_ROOT/sandbox/claude_cmux.py" <<'EOF'
+#!/usr/bin/env python3
+
+import os
+from typing import Any, Dict, Iterable
+
+
+def _first_string(payload: Dict[str, Any], key_paths: Iterable[str]) -> str:
+    for key_path in key_paths:
+        value: Any = payload
+        for part in key_path.split("."):
+            if not isinstance(value, dict):
+                value = ""
+                break
+            value = value.get(part, "")
+        if isinstance(value, str) and value:
+            return value
+    return ""
+
+
+def _subtitle_for_message(message: str) -> str:
+    lower = message.lower()
+    if any(token in lower for token in ("permission", "approve", "approval")):
+        return "Permission"
+    if any(token in lower for token in ("wait", "input")):
+        return "Waiting"
+    if any(token in lower for token in ("error", "failed")):
+        return "Error"
+    return "Attention"
+
+
+def build_request(
+    subcommand: str,
+    payload: Dict[str, Any],
+    cmux_socket_path: str,
+    cmux_workspace_id: str = "",
+    cmux_surface_id: str = "",
+) -> Dict[str, str]:
+    if not cmux_socket_path:
+        raise ValueError("cmux_socket_path is required")
+
+    normalized = subcommand.strip().lower()
+    if normalized in ("notification", "notify"):
+        body = _first_string(
+            payload,
+            (
+                "message",
+                "body",
+                "text",
+                "prompt",
+                "error",
+                "description",
+                "notification.message",
+                "notification.body",
+                "notification.text",
+                "notification.prompt",
+                "data.message",
+                "data.body",
+                "data.text",
+                "data.prompt",
+            ),
+        ) or "Claude needs your attention"
+        subtitle = _subtitle_for_message(body)
+    elif normalized in ("stop", "idle"):
+        body = _first_string(
+            payload,
+            (
+                "stop_hook.active_transcript_path",
+                "message",
+                "body",
+                "text",
+            ),
+        )
+        body = body or "Claude session completed"
+        subtitle = "Completed"
+        cwd = _first_string(payload, ("cwd",))
+        if cwd:
+            subtitle = f"Completed in {os.path.basename(cwd.rstrip('/')) or cwd}"
+    else:
+        raise ValueError("unsupported hook subcommand")
+
+    request = {
+        "action": "cmux_notify",
+        "title": "Claude Code",
+        "subtitle": subtitle,
+        "body": body,
+        "cmux_socket_path": cmux_socket_path,
+    }
+    if cmux_workspace_id:
+        request["cmux_workspace_id"] = cmux_workspace_id
+    if cmux_surface_id:
+        request["cmux_surface_id"] = cmux_surface_id
+    return request
+EOF
+
+cat >"$TARGET_ROOT/sandbox/claude-cmux-notify.py" <<'EOF'
+#!/usr/bin/env python3
+
+import json
+import sys
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+from claude_cmux import build_request
+
+
+def load_runtime_config() -> dict:
+    config_path = Path(__file__).resolve().parent / ".runtime" / "claude-cmux.json"
+    if not config_path.exists():
+        return {}
+    try:
+        return json.loads(config_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def main() -> int:
+    config = load_runtime_config()
+    if not config.get("enabled"):
+        return 0
+
+    host_proxy_url = str(config.get("host_proxy_url", "")).strip()
+    cmux_socket_path = str(config.get("cmux_socket_path", "")).strip()
+    if not host_proxy_url or not cmux_socket_path:
+        return 0
+
+    subcommand = sys.argv[1] if len(sys.argv) > 1 else "notification"
+    raw_payload = sys.stdin.read()
+    try:
+        payload = json.loads(raw_payload) if raw_payload.strip() else {}
+    except json.JSONDecodeError:
+        payload = {}
+
+    try:
+        request_payload = build_request(
+            subcommand,
+            payload,
+            cmux_socket_path,
+            str(config.get("cmux_workspace_ref", "")).strip() or str(config.get("cmux_workspace_id", "")).strip(),
+            str(config.get("cmux_surface_ref", "")).strip() or str(config.get("cmux_surface_id", "")).strip(),
+        )
+    except ValueError:
+        return 0
+
+    request = urllib.request.Request(
+        host_proxy_url,
+        data=json.dumps(request_payload).encode("utf-8"),
+        headers={"Content-Type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5):
+            return 0
+    except (urllib.error.HTTPError, urllib.error.URLError, TimeoutError):
+        return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
+EOF
+
+cat >"$TARGET_ROOT/sandbox/host-proxy.py" <<'EOF'
+#!/usr/bin/env python3
+"""
+Minimal host proxy for a Claude Docker sandbox.
+Supports:
+- sandbox notification delivery back to cmux
+- host-side `bd` execution for sandbox shims
+"""
+
+import argparse
+import json
+import os
+import re
+import subprocess
+import sys
+from http.server import BaseHTTPRequestHandler, HTTPServer
+
+PROJECT_ROOT = None
+
+
+def sanitize_notification_field(value: str, max_length: int) -> str:
+    cleaned = re.sub(r"[\x00-\x1f\x7f]+", " ", value or "")
+    cleaned = cleaned.replace(";", ":").strip()
+    return cleaned[:max_length]
+
+
+def run_cmux_notify(payload: dict) -> subprocess.CompletedProcess:
+    cmux_socket_path = payload.get("cmux_socket_path", "")
+    if not isinstance(cmux_socket_path, str) or not cmux_socket_path.strip():
+        raise ValueError("cmux_socket_path is required")
+
+    title = sanitize_notification_field(str(payload.get("title", "Notification")), 120)
+    subtitle = sanitize_notification_field(str(payload.get("subtitle", "")), 120)
+    body = sanitize_notification_field(str(payload.get("body", "")), 600)
+
+    argv = ["cmux", "notify"]
+    workspace_id = payload.get("cmux_workspace_id", "")
+    surface_id = payload.get("cmux_surface_id", "")
+    if isinstance(workspace_id, str) and workspace_id.strip():
+        argv.extend(["--workspace", workspace_id.strip()])
+    if isinstance(surface_id, str) and surface_id.strip():
+        argv.extend(["--surface", surface_id.strip()])
+    argv.extend(["--title", title])
+    if subtitle:
+        argv.extend(["--subtitle", subtitle])
+    if body:
+        argv.extend(["--body", body])
+
+    env = os.environ.copy()
+    env["CMUX_SOCKET_PATH"] = cmux_socket_path.strip()
+    env.pop("CMUX_WORKSPACE_ID", None)
+    env.pop("CMUX_SURFACE_ID", None)
+    env.pop("CMUX_TAB_ID", None)
+
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=5,
+        env=env,
+    )
+
+
+def resolve_cwd(requested_cwd: str) -> str:
+    project_root = os.path.realpath(PROJECT_ROOT or os.getcwd())
+    if not requested_cwd:
+        return project_root
+
+    resolved = os.path.realpath(requested_cwd)
+    if resolved == project_root or resolved.startswith(project_root + os.sep):
+        return resolved
+    raise ValueError("cwd must stay within the project root")
+
+
+def run_bd(payload: dict) -> subprocess.CompletedProcess:
+    argv = payload.get("argv", [])
+    if not isinstance(argv, list) or not argv:
+        raise ValueError("argv is required")
+    if any(not isinstance(item, str) for item in argv):
+        raise ValueError("argv entries must be strings")
+    if argv[0] != "bd":
+        raise ValueError("only bd is supported through argv execution")
+
+    cwd = resolve_cwd(str(payload.get("cwd", "")).strip())
+    return subprocess.run(
+        argv,
+        capture_output=True,
+        text=True,
+        timeout=300,
+        cwd=cwd,
+    )
+
+
+class Handler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "ok"}).encode())
+
+    def do_POST(self):
+        try:
+            content_length = int(self.headers.get("Content-Length", 0))
+            raw = self.rfile.read(content_length)
+            print(f"[REQ] raw body: {raw[:500]}", flush=True)
+            body = json.loads(raw)
+
+            action = body.get("action", "")
+            if action == "cmux_notify":
+                result = run_cmux_notify(body)
+            elif "argv" in body:
+                result = run_bd(body)
+            else:
+                self.send_response(403)
+                self.end_headers()
+                self.wfile.write(json.dumps({"error": "unsupported action"}).encode())
+                print("[BLOCKED] unsupported action", flush=True)
+                return
+
+            response = json.dumps(
+                {
+                    "exit_code": result.returncode,
+                    "stdout": result.stdout[-10000:],
+                    "stderr": result.stderr[-5000:],
+                }
+            )
+            self.send_response(200)
+            self.end_headers()
+            self.wfile.write(response.encode())
+            print(
+                f"[NOTIFY] exit={result.returncode} stdout={len(result.stdout)}B stderr={len(result.stderr)}B",
+                flush=True,
+            )
+            if result.returncode != 0 and result.stderr:
+                print(f"[NOTIFY STDERR] {result.stderr.rstrip()}", flush=True)
+        except json.JSONDecodeError as exc:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": f"bad json: {exc}"}).encode())
+        except ValueError as exc:
+            self.send_response(400)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": str(exc)}).encode())
+        except Exception as exc:
+            self.send_response(500)
+            self.end_headers()
+            self.wfile.write(json.dumps({"error": f"{type(exc).__name__}: {exc}"}).encode())
+
+    def log_message(self, fmt, *args):
+        sys.stderr.write(f"  {self.address_string()} - {fmt % args}\n")
+
+
+def main() -> None:
+    global PROJECT_ROOT
+    parser = argparse.ArgumentParser(description="Host proxy for Docker sandbox notifications and bd")
+    parser.add_argument("--port", type=int, default=9007, help="Port to listen on (default: 9007)")
+    parser.add_argument("--project-root", default=os.getcwd(), help="Project root boundary for host commands")
+    args = parser.parse_args()
+    PROJECT_ROOT = os.path.realpath(args.project_root)
+
+    server = HTTPServer(("127.0.0.1", args.port), Handler)
+    print(f"Host proxy listening on 127.0.0.1:{args.port}")
+    print(f"Project root: {PROJECT_ROOT}")
+    print("Supported actions: cmux_notify, argv[0]=bd")
+    print("Press Ctrl+C to stop\n")
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        print("\nShutting down.")
+        server.server_close()
+
+
+if __name__ == "__main__":
+    main()
+EOF
+chmod +x "$TARGET_ROOT/sandbox/host-proxy.py"
+
+cat >"$TARGET_ROOT/sandbox/shims/host-shim" <<'EOF'
+#!/usr/bin/env bash
+set -euo pipefail
+
+find_repo_root() {
+  local dir="$PWD"
+  while [ "$dir" != "/" ]; do
+    if [ -d "$dir/sandbox" ] && [ -d "$dir/.claude" ]; then
+      printf '%s\n' "$dir"
+      return 0
+    fi
+    dir="$(dirname "$dir")"
+  done
+  return 1
+}
+
+repo_root="$(find_repo_root || true)"
+host_proxy=""
+runtime_config=""
+
+if [ -n "$repo_root" ]; then
+  runtime_config="$repo_root/sandbox/.runtime/claude-cmux.json"
+fi
+
+if command -v python3 >/dev/null 2>&1 && [ -n "$runtime_config" ] && [ -f "$runtime_config" ]; then
+  host_proxy="$(python3 - "$runtime_config" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+try:
+    data = json.loads(path.read_text(encoding="utf-8"))
+except Exception:
+    print("")
+else:
+    print(str(data.get("host_proxy_url", "")).strip())
+PY
+)"
+fi
+
+if [ -z "$host_proxy" ] && [ -n "$repo_root" ] && [ -f "$repo_root/sandbox/.env" ]; then
+  set -a
+  . "$repo_root/sandbox/.env"
+  set +a
+  host_proxy="http://host.docker.internal:${SANDBOX_PROXY_PORT:-9007}"
+fi
+
+HOST_PROXY="${host_proxy:-http://host.docker.internal:9007}"
+SHIM_NAME="${HOST_SHIM_CMD:-$(basename "$0")}"
+
+CWD="$PWD"
+if [[ "$CWD" == /home/agent/workspace* ]]; then
+  host_path="$(mount | awk '$3 == "/home/agent/workspace" && $5 == "virtiofs" {print $1; exit}')"
+  if [ -z "$host_path" ]; then
+    host_path="$(mount | awk '$5 == "virtiofs" && index($3, "/home/agent/workspace") == 1 {print $1; exit}')"
+  fi
+  if [ -n "$host_path" ]; then
+    CWD="${CWD/\/home\/agent\/workspace/$host_path}"
+  fi
+fi
+
+argv_json="$(jq -n '$ARGS.positional' --args -- "$SHIM_NAME" "$@")"
+payload="$(jq -n --argjson argv "$argv_json" --arg cwd "$CWD" '{argv: $argv, cwd: $cwd}')"
+
+tmpfile="$(mktemp /tmp/host-shim.XXXXXX)" || { echo "Error: mktemp failed" >&2; exit 1; }
+trap 'rm -f "$tmpfile"' EXIT
+
+http_code="$(curl -s -o "$tmpfile" -w "%{http_code}" --max-time 300 \
+  -X POST "$HOST_PROXY" \
+  -H "Content-Type: application/json" \
+  -d "$payload" 2>/dev/null || echo "000")"
+
+if [ "$http_code" = "000" ]; then
+  echo "Error: host proxy not reachable at $HOST_PROXY" >&2
+  echo "Start it with: ./sandbox/sandbox.sh proxy" >&2
+  exit 1
+fi
+
+response="$(cat "$tmpfile")"
+if ! echo "$response" | jq empty 2>/dev/null; then
+  echo "Error: proxy returned invalid response (HTTP $http_code)" >&2
+  echo "$response" | head -3 >&2
+  exit 1
+fi
+
+error="$(echo "$response" | jq -r '.error // empty')"
+if [ -n "$error" ]; then
+  echo "$error" >&2
+  exit 1
+fi
+
+echo "$response" | jq -r '.stdout // empty'
+stderr_out="$(echo "$response" | jq -r '.stderr // empty')"
+[ -n "$stderr_out" ] && echo "$stderr_out" >&2
+
+exit_code="$(echo "$response" | jq -r '.exit_code // "1"')"
+exit "${exit_code}"
+EOF
+chmod +x "$TARGET_ROOT/sandbox/shims/host-shim"
+
+cat >"$TARGET_ROOT/sandbox/Dockerfile" <<EOF
+FROM docker/sandbox-templates:claude-code
+
+USER root
+RUN apt-get update && apt-get install -y bash python3 jq curl && rm -rf /var/lib/apt/lists/*
+
+RUN mkdir -p /Users/${HOST_USER} && \\
+    ln -s /Users/${HOST_USER}/.claude /home/agent/.claude
+
+COPY shims/host-shim /usr/local/bin/host-shim
+RUN chmod +x /usr/local/bin/host-shim && \\
+    ln -sf /usr/local/bin/host-shim /usr/local/bin/bd
+
+ENV SHELL=/bin/bash
+
+USER agent
+EOF
+
+cat >"$TARGET_ROOT/sandbox/.env.example" <<'EOF'
+# Copy this file to sandbox/.env and adjust values as needed.
+#
+# Example:
+#   cp sandbox/.env.example sandbox/.env
+
+# Host proxy port used by:
+# - ./sandbox/sandbox.sh proxy
+# - ./sandbox/sandbox.sh run
+SANDBOX_PROXY_PORT=9007
+
+# Optional extra host ports to allow from inside the sandbox via
+# host.docker.internal:<port>. Separate multiple ports with commas and no
+# spaces unless you quote the whole value.
+# Example:
+# SANDBOX_ALLOWED_HOST_PORTS=5433
+# SANDBOX_ALLOWED_HOST_PORTS=5433,6380
+SANDBOX_ALLOWED_HOST_PORTS=
+
+# Optional extra read-only mounts exposed inside the sandbox at the same paths.
+# Separate multiple paths with semicolons.
+# Example:
+# SANDBOX_EXTRA_READONLY_MOUNTS=/Users/felipeiketani/MyProjects/axe
+# SANDBOX_EXTRA_READONLY_MOUNTS=/path/one;/path/two
+SANDBOX_EXTRA_READONLY_MOUNTS=
+EOF
+
+cat >"$TARGET_ROOT/sandbox/sandbox.sh" <<'EOF'
+#!/bin/bash
+# Bare-bones Claude Docker sandbox manager with CMUX notification delivery.
+# Usage: ./sandbox/sandbox.sh <command> [options]
+#
+# Commands:
+#   init          Build the Docker sandbox image
+#   proxy         Start the host proxy (foreground)
+#   run           Launch or resume the sandbox
+#   status        Show proxy/image/sandbox status
+#
+# Options:
+#   --port PORT         Host proxy port (default: 9007)
+#   --name NAME         Sandbox name override
+#   --workspace PATH    Workspace path inside the project (default: project root)
+#   -h, --help          Show this help
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
+if [ -f "$SCRIPT_DIR/.env" ]; then
+  set -a
+  . "$SCRIPT_DIR/.env"
+  set +a
+fi
+
+PROXY_PORT="${SANDBOX_PROXY_PORT:-9007}"
+ALLOWED_HOST_PORTS_RAW="${SANDBOX_ALLOWED_HOST_PORTS:-}"
+EXTRA_READONLY_MOUNTS_RAW="${SANDBOX_EXTRA_READONLY_MOUNTS:-}"
+SANDBOX_NAME=""
+WORKSPACE_INPUT="."
+
+safe_name() {
+  printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | tr -cs 'a-z0-9._-' '-'
+}
+
+IMAGE_NAME="$(safe_name "$(basename "$PROJECT_ROOT")")-claude-sandbox:v1"
+
+if [ -t 1 ]; then
+  RED='\033[0;31m'; GREEN='\033[0;32m'; YELLOW='\033[0;33m'; BLUE='\033[0;34m'; NC='\033[0m'
+else
+  RED=''; GREEN=''; YELLOW=''; BLUE=''; NC=''
+fi
+
+log()  { echo -e "${BLUE}[sandbox]${NC} $*"; }
+ok()   { echo -e "${GREEN}[sandbox]${NC} $*"; }
+warn() { echo -e "${YELLOW}[sandbox]${NC} $*"; }
+err()  { echo -e "${RED}[sandbox]${NC} $*" >&2; }
+
+usage() {
+  sed -n '2,/^[^#]/s/^# \{0,1\}//p' "${BASH_SOURCE[0]}"
+  exit 0
+}
+
+check_deps() {
+  local missing=()
+  for cmd in docker python3 curl; do
+    command -v "$cmd" &>/dev/null || missing+=("$cmd")
+  done
+  if ! docker sandbox version &>/dev/null; then
+    missing+=("docker sandbox (Docker Desktop with sandbox support)")
+  fi
+  if [ ${#missing[@]} -gt 0 ]; then
+    err "Missing dependencies: ${missing[*]}"
+    exit 1
+  fi
+}
+
+proxy_listening() {
+  curl -sf -o /dev/null --max-time 1 "http://localhost:$PROXY_PORT" 2>/dev/null
+}
+
+resolve_workspace_path() {
+  local requested="$1"
+  local resolved
+  if [[ "$requested" = /* ]]; then
+    resolved="$(cd "$requested" 2>/dev/null && pwd)" || return 1
+  else
+    resolved="$(cd "$PROJECT_ROOT/$requested" 2>/dev/null && pwd)" || return 1
+  fi
+
+  case "$resolved" in
+    "$PROJECT_ROOT"|"$PROJECT_ROOT"/*) printf '%s\n' "$resolved" ;;
+    *) return 1 ;;
+  esac
+}
+
+cmd_init() {
+  check_deps
+  log "Building sandbox image: $IMAGE_NAME"
+  docker build -t "$IMAGE_NAME" "$SCRIPT_DIR/"
+  ok "Image built: $IMAGE_NAME"
+}
+
+cmd_proxy() {
+  log "Starting host proxy on :$PROXY_PORT"
+  echo ""
+  python3 "$SCRIPT_DIR/host-proxy.py" --port "$PROXY_PORT" --project-root "$PROJECT_ROOT"
+}
+
+sandbox_exists() {
+  docker sandbox ls 2>/dev/null | awk 'NR>1 {print $1}' | grep -qx "$1"
+}
+
+sandbox_for_workspace() {
+  local ws="$1"
+  docker sandbox ls 2>/dev/null | awk -v ws="$ws" 'NR>1 && $NF == ws {print $1}'
+}
+
+cmd_run() {
+  check_deps
+  local workspace_path runtime_dir runtime_config network_proxy_pid=""
+  local cmux_identify_json="" cmux_workspace_ref="" cmux_surface_ref=""
+  local runtime_enabled="false"
+  local network_allow_args=()
+  local network_allow_targets=()
+
+  workspace_path="$(resolve_workspace_path "$WORKSPACE_INPUT")" || {
+    err "Workspace must exist inside the project root: $WORKSPACE_INPUT"
+    exit 1
+  }
+
+  if ! proxy_listening; then
+    err "Proxy not reachable on localhost:$PROXY_PORT"
+    err "Start it first: ./sandbox/sandbox.sh proxy"
+    exit 1
+  fi
+  ok "Proxy reachable on :$PROXY_PORT"
+
+  if [ -z "$SANDBOX_NAME" ]; then
+    local project_label workspace_label
+    project_label="$(safe_name "$(basename "$PROJECT_ROOT")")"
+    workspace_label="$(safe_name "$(basename "$workspace_path")")"
+    if [ "$workspace_path" = "$PROJECT_ROOT" ]; then
+      SANDBOX_NAME="claude-$project_label"
+    else
+      SANDBOX_NAME="claude-$project_label-$workspace_label"
+    fi
+  fi
+
+  local sandbox_args=()
+  if sandbox_exists "$SANDBOX_NAME"; then
+    log "Resuming existing sandbox: $SANDBOX_NAME"
+    sandbox_args=(sandbox run "$SANDBOX_NAME")
+  else
+    local existing
+    existing="$(sandbox_for_workspace "$workspace_path")"
+    if [ -n "$existing" ]; then
+      warn "Workspace already used by sandbox '$existing'"
+      SANDBOX_NAME="$existing"
+      sandbox_args=(sandbox run "$SANDBOX_NAME")
+    else
+      if ! docker image inspect "$IMAGE_NAME" &>/dev/null; then
+        err "Image $IMAGE_NAME not found. Run: ./sandbox/sandbox.sh init"
+        exit 1
+      fi
+      log "Creating new sandbox: $SANDBOX_NAME"
+      sandbox_args=(sandbox run --template "$IMAGE_NAME" --name "$SANDBOX_NAME")
+      sandbox_args+=(claude "$workspace_path")
+
+      local claude_home="$HOME/.claude"
+      if [ -d "$claude_home" ]; then
+        sandbox_args+=("$claude_home")
+        log "Mounting $claude_home (read-write)"
+      fi
+
+      local tmpdir="${TMPDIR:-/tmp}"
+      tmpdir="${tmpdir%/}"
+      if [ -d "$tmpdir" ]; then
+        sandbox_args+=("${tmpdir}:ro")
+        log "Mounting $tmpdir (read-only, image pastes)"
+      fi
+
+      if [ -n "$EXTRA_READONLY_MOUNTS_RAW" ]; then
+        local extra_mounts=() extra_path=""
+        IFS=';' read -r -a extra_mounts <<<"$EXTRA_READONLY_MOUNTS_RAW"
+        for extra_path in "${extra_mounts[@]}"; do
+          extra_path="${extra_path#"${extra_path%%[![:space:]]*}"}"
+          extra_path="${extra_path%"${extra_path##*[![:space:]]}"}"
+          if [ -z "$extra_path" ]; then
+            continue
+          fi
+          if [ -d "$extra_path" ]; then
+            sandbox_args+=("${extra_path}:ro")
+            log "Mounting $extra_path (read-only)"
+          else
+            warn "Skipping missing extra read-only mount: $extra_path"
+          fi
+        done
+      fi
+    fi
+  fi
+
+  runtime_dir="$SCRIPT_DIR/.runtime"
+  runtime_config="$runtime_dir/claude-cmux.json"
+  mkdir -p "$runtime_dir"
+  if [ -n "${CMUX_SOCKET_PATH:-}" ]; then
+    runtime_enabled="true"
+    if command -v cmux >/dev/null 2>&1; then
+      cmux_identify_json="$(cmux identify --json --id-format both 2>/dev/null || true)"
+    fi
+    if [ -n "$cmux_identify_json" ]; then
+      cmux_workspace_ref="$(printf '%s' "$cmux_identify_json" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("focused", {}).get("workspace_ref", ""))' 2>/dev/null || true)"
+      cmux_surface_ref="$(printf '%s' "$cmux_identify_json" | python3 -c 'import json,sys; data=json.load(sys.stdin); print(data.get("focused", {}).get("surface_ref", ""))' 2>/dev/null || true)"
+    fi
+    local cmux_workspace_json cmux_surface_json cmux_workspace_ref_json cmux_surface_ref_json
+    cmux_workspace_json="$(printf '%s' "${CMUX_WORKSPACE_ID:-}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+    cmux_surface_json="$(printf '%s' "${CMUX_SURFACE_ID:-}" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+    cmux_workspace_ref_json="$(printf '%s' "$cmux_workspace_ref" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+    cmux_surface_ref_json="$(printf '%s' "$cmux_surface_ref" | python3 -c 'import json,sys; print(json.dumps(sys.stdin.read()))')"
+    cat >"$runtime_config" <<JSON
+{"enabled":$runtime_enabled,"host_proxy_url":"http://host.docker.internal:$PROXY_PORT","cmux_socket_path":"$CMUX_SOCKET_PATH","cmux_workspace_id":$cmux_workspace_json,"cmux_surface_id":$cmux_surface_json,"cmux_workspace_ref":$cmux_workspace_ref_json,"cmux_surface_ref":$cmux_surface_ref_json}
+JSON
+    log "CMUX notifications enabled for socket $CMUX_SOCKET_PATH"
+    if [ -n "$cmux_workspace_ref" ] && [ -n "$cmux_surface_ref" ]; then
+      log "CMUX notification target: $cmux_workspace_ref / $cmux_surface_ref"
+    fi
+  else
+    cat >"$runtime_config" <<JSON
+{"enabled":false,"host_proxy_url":"http://host.docker.internal:$PROXY_PORT","cmux_socket_path":"","cmux_workspace_id":"","cmux_surface_id":"","cmux_workspace_ref":"","cmux_surface_ref":""}
+JSON
+    warn "CMUX_SOCKET_PATH not set on host; sandbox Claude notifications will be disabled"
+  fi
+
+  network_allow_args=(--allow-host "localhost:$PROXY_PORT")
+  network_allow_targets=("localhost:$PROXY_PORT")
+  if [ -n "$ALLOWED_HOST_PORTS_RAW" ]; then
+    local allowed_host_ports=() host_port=""
+    IFS=',' read -r -a allowed_host_ports <<<"$ALLOWED_HOST_PORTS_RAW"
+    for host_port in "${allowed_host_ports[@]}"; do
+      host_port="${host_port#"${host_port%%[![:space:]]*}"}"
+      host_port="${host_port%"${host_port##*[![:space:]]}"}"
+      if [ -z "$host_port" ]; then
+        continue
+      fi
+      if [[ ! "$host_port" =~ ^[0-9]+$ ]]; then
+        warn "Skipping invalid SANDBOX_ALLOWED_HOST_PORTS entry: $host_port"
+        continue
+      fi
+      network_allow_args+=(--allow-host "localhost:$host_port")
+      network_allow_targets+=("localhost:$host_port")
+    done
+  fi
+
+  (
+    sleep 3
+    docker sandbox network proxy "$SANDBOX_NAME" \
+      "${network_allow_args[@]}" 2>/dev/null || true
+    ok "Network: allowed ${network_allow_targets[*]} for $SANDBOX_NAME"
+  ) &
+  network_proxy_pid="$!"
+
+  trap 'if [ -n "'"$network_proxy_pid"'" ]; then kill "'"$network_proxy_pid"'" 2>/dev/null || true; fi' EXIT
+  docker "${sandbox_args[@]}" || true
+  trap - EXIT
+  log "Sandbox $SANDBOX_NAME exited"
+}
+
+cmd_status() {
+  if proxy_listening; then
+    ok "Proxy: listening on :$PROXY_PORT"
+  else
+    warn "Proxy: not reachable on :$PROXY_PORT"
+  fi
+
+  if docker image inspect "$IMAGE_NAME" &>/dev/null; then
+    ok "Image: $IMAGE_NAME exists"
+  else
+    warn "Image: $IMAGE_NAME not found (run: sandbox.sh init)"
+  fi
+
+  local sandboxes
+  sandboxes="$(docker sandbox ls 2>/dev/null | grep -v "^NAME" || true)"
+  if [ -n "$sandboxes" ]; then
+    ok "Sandboxes:"
+    echo "$sandboxes" | while read -r line; do
+      echo "  $line"
+    done
+  else
+    warn "Sandboxes: none running"
+  fi
+}
+
+COMMAND=""
+while [ $# -gt 0 ]; do
+  case "$1" in
+    init|proxy|run|status)
+      COMMAND="$1"
+      ;;
+    --port)
+      PROXY_PORT="${2:?--port requires a value}"
+      shift
+      ;;
+    --name)
+      SANDBOX_NAME="${2:?--name requires a value}"
+      shift
+      ;;
+    --workspace)
+      WORKSPACE_INPUT="${2:?--workspace requires a value}"
+      shift
+      ;;
+    -h|--help)
+      usage
+      ;;
+    *)
+      err "Unknown argument: $1"
+      usage
+      ;;
+  esac
+  shift
+done
+
+if [ -z "$COMMAND" ]; then
+  err "No command specified"
+  usage
+fi
+
+"cmd_$COMMAND"
+EOF
+chmod +x "$TARGET_ROOT/sandbox/sandbox.sh"
+
+cat >"$TARGET_ROOT/sandbox/README.md" <<'EOF'
+# Claude Sandbox
+
+This is a bare-bones Claude Docker sandbox with:
+
+- CMUX notification delivery
+- a host-backed `bd` command inside the sandbox
+- optional extra allowed host ports exposed as `host.docker.internal:<port>`
+- optional extra read-only mounts for things like shared skills repos
+
+Commands:
+
+```bash
+./sandbox/sandbox.sh init
+./sandbox/sandbox.sh proxy
+./sandbox/sandbox.sh run
+./sandbox/sandbox.sh run --workspace path/inside/project
+```
+
+Configuration:
+
+```bash
+cp sandbox/.env.example sandbox/.env
+```
+
+Then adjust values in `sandbox/.env`, for example:
+
+```bash
+SANDBOX_PROXY_PORT=9017
+SANDBOX_ALLOWED_HOST_PORTS=5433,6380
+SANDBOX_EXTRA_READONLY_MOUNTS=/Users/felipeiketani/MyProjects/axe
+```
+
+This baseline setup includes:
+
+- project-local Claude `Notification` and `Stop` hooks
+- launch-time `cmux identify --json --id-format both` capture
+- runtime config under `sandbox/.runtime/`
+- a host proxy limited to `cmux_notify` and `bd`
+- a `bd` shim in the container that delegates to the host proxy
+- optional extra host ports configured in `sandbox/.env`
+- optional extra read-only mounts configured in `sandbox/.env`
+- an explicit `SHELL=/bin/bash` environment for Claude shell commands
+
+It intentionally does not include broader host command shims for build tools or git.
+EOF
+
+log "Installed bare-bones Claude sandbox into $TARGET_ROOT"
+log "Next steps:"
+log "  cd $TARGET_ROOT"
+log "  ./sandbox/sandbox.sh init"
+log "  ./sandbox/sandbox.sh proxy"
+log "  ./sandbox/sandbox.sh run"
+log "  ./sandbox/sandbox.sh run --workspace path/inside/project"
