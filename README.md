@@ -25,6 +25,10 @@ Without a usable live `cmux` tree, `mux tab` still opens tmux sessions, and `mux
 
 `mux init` configures Claude Code and Codex hooks so those CLIs can notify `cmux` from plain `cmux` shells and from `tmux` running inside `cmux`. `mux uninstall` removes the hook entries that `mux` added.
 
+If you need to route notifications from a Docker sandbox back into `cmux`, see
+[`docs/sandbox-cmux-notifications.md`](docs/sandbox-cmux-notifications.md) for
+the reusable pattern, topology guidance, and failure modes.
+
 ## Installation
 
 There is no Homebrew package right now.
