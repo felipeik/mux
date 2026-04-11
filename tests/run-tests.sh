@@ -2647,6 +2647,88 @@ EOF
   esac
 }
 
+test_mux_cleanup_ignores_sessions_not_created_by_mux() {
+  local temp_dir stub_dir output log_file state_file jq_bin
+  temp_dir="$(make_temp_dir)"
+  stub_dir="$temp_dir/bin"
+  output="$temp_dir/output.txt"
+  log_file="$temp_dir/log.txt"
+  state_file="$temp_dir/state.json"
+  jq_bin="$(command -v jq)"
+  mkdir -p "$stub_dir"
+
+  cat >"$temp_dir/tree.json" <<'EOF'
+{
+  "windows": [
+    {
+      "workspaces": [
+        {
+          "title": "Alpha",
+          "panes": [
+            {
+              "index": 0,
+              "surfaces": [
+                {
+                  "type": "terminal",
+                  "title": "mux backend",
+                  "index_in_pane": 0
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
+EOF
+
+  write_executable "$stub_dir/jq" <<EOF
+#!/usr/bin/env bash
+exec "$jq_bin" "\$@"
+EOF
+
+  write_executable "$stub_dir/cmux" <<EOF
+#!/usr/bin/env bash
+printf 'cmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "tree" ] && [ "\$2" = "--all" ] && [ "\$3" = "--json" ]; then
+  cat "$temp_dir/tree.json"
+  exit 0
+fi
+exit 0
+EOF
+
+  # codex-session is NOT mux-managed (show-environment returns error for it)
+  write_executable "$stub_dir/tmux" <<EOF
+#!/usr/bin/env bash
+printf 'tmux:%s\n' "\$*" >>"$log_file"
+if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
+  cat <<'OUT'
+backend
+codex-session
+OUT
+  exit 0
+fi
+if [ "\$1" = "show-environment" ] && [ "\$4" = "MUX_MANAGED" ]; then
+  if [ "\$3" = "codex-session" ]; then
+    exit 1
+  fi
+  printf 'MUX_MANAGED=1\n'
+  exit 0
+fi
+exit 0
+EOF
+
+  PATH="$stub_dir:/usr/bin:/bin" MUX_STATE_FILE="$state_file" "$ROOT_DIR/bin/mux" cleanup --auto-approve >"$output" 2>&1 || true
+
+  assert_contains "nothing to cleanup" "$(cat "$output")" "expected cleanup to ignore non-mux sessions"
+  case "$(cat "$log_file")" in
+    *"kill-session -t codex-session"*)
+      fail "expected cleanup to never kill sessions not created by mux"
+      ;;
+  esac
+}
+
 test_readme_documents_supported_commands() {
   local readme
   readme="$(cat "$ROOT_DIR/README.md")"
@@ -2727,6 +2809,7 @@ main() {
   test_mux_cleanup_kills_orphans_after_exact_yes
   test_mux_cleanup_auto_approve_skips_prompt
   test_mux_cleanup_prints_nothing_to_cleanup_when_all_sessions_are_tracked
+  test_mux_cleanup_ignores_sessions_not_created_by_mux
   test_readme_documents_supported_commands
   echo "PASS"
 }
