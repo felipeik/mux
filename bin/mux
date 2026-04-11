@@ -1094,7 +1094,11 @@ open_session() {
 
   rename_cmux_tab "$title"
   best_effort_save_on_launch
-  exec tmux new-session -A -s "$name"
+  if tmux has-session -t "$name" 2>/dev/null; then
+    exec tmux new-session -A -s "$name"
+  else
+    exec tmux new-session -s "$name" -e MUX_MANAGED=1
+  fi
 }
 
 join_session() {
@@ -1200,6 +1204,24 @@ tmux_session_names() {
   tmux list-sessions -F '#{session_name}' 2>/dev/null || true
 }
 
+# List only tmux sessions that were created by mux (tagged with MUX_MANAGED=1).
+mux_managed_session_names() {
+  if ! command -v tmux >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local name val
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    val="$(tmux show-environment -t "$name" MUX_MANAGED 2>/dev/null || true)"
+    if [ "$val" = "MUX_MANAGED=1" ]; then
+      printf '%s\n' "$name"
+    fi
+  done <<EOF
+$(tmux list-sessions -F '#{session_name}' 2>/dev/null || true)
+EOF
+}
+
 list_contains_line() {
   local needle="$1"
   local haystack="$2"
@@ -1275,13 +1297,15 @@ orphan_tmux_sessions() {
   local tracked_sessions="$1"
   local session
 
+  # Only consider mux-managed sessions as cleanup candidates.
+  # Sessions created outside mux (Codex, manual tmux, etc.) are never touched.
   while IFS= read -r session; do
     [ -n "$session" ] || continue
     if ! list_contains_line "$session" "$tracked_sessions"; then
       printf '%s\n' "$session"
     fi
   done <<EOF
-$(tmux_session_names)
+$(mux_managed_session_names)
 EOF
 }
 cmd_list() {

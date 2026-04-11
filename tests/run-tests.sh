@@ -2389,6 +2389,10 @@ orphan
 OUT
   exit 0
 fi
+if [ "\$1" = "show-environment" ] && [ "\$4" = "MUX_MANAGED" ]; then
+  printf 'MUX_MANAGED=1\n'
+  exit 0
+fi
 exit 0
 EOF
 
@@ -2463,6 +2467,10 @@ backend
 orphan-1
 orphan-2
 OUT
+  exit 0
+fi
+if [ "\$1" = "show-environment" ] && [ "\$4" = "MUX_MANAGED" ]; then
+  printf 'MUX_MANAGED=1\n'
   exit 0
 fi
 exit 0
@@ -2545,6 +2553,10 @@ orphan
 OUT
   exit 0
 fi
+if [ "\$1" = "show-environment" ] && [ "\$4" = "MUX_MANAGED" ]; then
+  printf 'MUX_MANAGED=1\n'
+  exit 0
+fi
 exit 0
 EOF
 
@@ -2616,6 +2628,10 @@ if [ "\$1" = "list-sessions" ] && [ "\$2" = "-F" ]; then
   cat <<'OUT'
 backend
 OUT
+  exit 0
+fi
+if [ "\$1" = "show-environment" ] && [ "\$4" = "MUX_MANAGED" ]; then
+  printf 'MUX_MANAGED=1\n'
   exit 0
 fi
 exit 0
